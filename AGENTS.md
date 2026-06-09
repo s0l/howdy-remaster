@@ -21,6 +21,7 @@ legacy data.
 Preferred quick checks:
 
 ```bash
+python3 -m unittest discover -s tests -v
 python3 -m py_compile howdy/src/recorders/video_capture.py howdy/src/compare.py howdy/src/cli/test.py howdy-gtk/src/tab_video.py
 meson compile -C build
 ```
@@ -54,6 +55,8 @@ sudo su -
 - GTK preview should remain simple GLib/GTK code; do not add asyncio unless the
   event-loop integration is explicit and tested.
 - Do not commit generated build output from `build/` or `dist/`.
+- Keep hardware-free behavior covered in `tests/`; mock camera/OpenCV I/O rather
+  than requiring `/dev/video*` in CI.
 
 ## Testing And Security Follow-Up
 
