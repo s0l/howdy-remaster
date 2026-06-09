@@ -6,6 +6,7 @@ import configparser
 import json
 import logging
 import os
+import select
 import signal
 import subprocess
 import sys
@@ -206,14 +207,16 @@ save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
+confirmation_required = os.environ.get("HOWDY_CONFIRM_AUTH") == "1"
 
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
+gtk_stdout_pipe = subprocess.PIPE if confirmation_required else gtk_pipe
 
 try:
     gtk_proc = subprocess.Popen(
         [paths_factory.gtk_bin_path(), "--start-auth-ui"],
         stdin=subprocess.PIPE,
-        stdout=gtk_pipe,
+        stdout=gtk_stdout_pipe,
         stderr=gtk_pipe,
         start_new_session=True,
     )
@@ -222,6 +225,43 @@ except FileNotFoundError:
     pass
 
 send_to_ui("M", _("Starting up..."))
+
+
+def request_ui_confirmation() -> bool:
+    if not confirmation_required:
+        return True
+
+    if gtk_proc is None or gtk_proc.stdout is None or gtk_proc.poll() is not None:
+        logger.error("Confirmation requested but auth UI is unavailable")
+        return False
+
+    send_to_ui("C", "1")
+    send_to_ui("M", _("Face recognized"))
+    send_to_ui("S", _("Approve this authentication request?"))
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        ready, _writable, _errors = select.select([gtk_proc.stdout], [], [], 0.2)
+        if not ready:
+            if gtk_proc.poll() is not None:
+                logger.info("Auth UI exited before confirmation")
+                return False
+            continue
+
+        response = gtk_proc.stdout.readline()
+        if not response:
+            return False
+
+        response_text = response.decode("utf-8", errors="replace").strip()
+        if response_text == "ALLOW":
+            logger.info("Authentication approved by auth UI")
+            return True
+        if response_text == "DENY":
+            logger.info("Authentication denied by auth UI")
+            return False
+
+    logger.info("Timed out waiting for auth UI confirmation")
+    return False
 
 timings["in"] = time.time() - timings["st"]
 logger.info("Face backend %s initialized", face_backend.name)
@@ -348,6 +388,9 @@ while True:
     face_locations = face_backend.detect(frame, gsframe)
     logger.debug("Frame %d: detected %d face(s)", frames, len(face_locations))
 
+    if not face_locations:
+        send_to_ui("M", _("Look at the camera"))
+
     for face_location in face_locations:
         face_encoding = face_backend.encode(frame, face_location)
         match_index, match = face_backend.match(encodings, face_encoding)
@@ -385,6 +428,9 @@ while True:
             if config.getboolean("rubberstamps", "enabled", fallback=False):
                 print(_("Rubberstamps are not supported by the opencv_sface backend yet"))
                 logger.error("Rubberstamps requested with unsupported backend")
+                exit(15)
+
+            if not request_ui_confirmation():
                 exit(15)
 
             exit(0)

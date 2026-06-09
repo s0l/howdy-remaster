@@ -22,6 +22,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -42,6 +43,28 @@ const auto DEFAULT_TIMEOUT =
 const auto MAX_RETRIES = 5;
 
 #define S(msg) gettext(msg)
+
+auto service_in_list(const std::string &services, const char *service) -> bool {
+  if (service == nullptr || services.empty()) {
+    return false;
+  }
+
+  std::istringstream stream(services);
+  std::string item;
+  while (std::getline(stream, item, ',')) {
+    auto start = item.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) {
+      continue;
+    }
+
+    auto end = item.find_last_not_of(" \t\r\n");
+    if (item.substr(start, end - start + 1) == service) {
+      return true;
+    }
+  }
+
+  return false;
+}
 
 /**
  * Inspect the status code returned by the compare process
@@ -223,6 +246,15 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
     return PAM_AUTH_ERR;
   }
 
+  const char *service = nullptr;
+  const void *service_ptr = nullptr;
+  if (pam_get_item(pamh, PAM_SERVICE, &service_ptr) == PAM_SUCCESS) {
+    service = static_cast<const char *>(service_ptr);
+  }
+  bool confirmation_required =
+      service_in_list(config.GetString("core", "confirmation_services", ""),
+                      service);
+
   // Check if we should continue
   pam_res = check_enabled(config, username);
   if (pam_res != PAM_SUCCESS) {
@@ -249,22 +281,20 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
     const struct pam_message msg = {.msg_style = msg_type, .msg = msg_str};
     const struct pam_message *msgp = &msg;
 
-    struct pam_response res = {};
-    struct pam_response *resp = &res;
+    struct pam_response *resp = nullptr;
 
-    return conv->conv(1, &msgp, &resp, conv->appdata_ptr);
+    int result = conv->conv(1, &msgp, &resp, conv->appdata_ptr);
+    if (resp != nullptr && resp->resp != nullptr) {
+      free(resp->resp);
+    }
+    free(resp);
+    return result;
   };
 
   // Initialize gettext
   setlocale(LC_ALL, "");
   bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
   textdomain(GETTEXT_PACKAGE);
-
-  const char *service = nullptr;
-  const void *service_ptr = nullptr;
-  if (pam_get_item(pamh, PAM_SERVICE, &service_ptr) == PAM_SUCCESS) {
-    service = static_cast<const char *>(service_ptr);
-  }
 
   bool show_detection_notice =
       config.GetBoolean("core", "detection_notice", true) ||
@@ -279,8 +309,12 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
 
   const char *const args[] = {PYTHON_EXECUTABLE_PATH, // NOLINT
                               COMPARE_PROCESS_PATH, username, nullptr};
-  std::vector<std::string> child_env_storage = {
-      "PATH=/usr/sbin:/usr/bin:/sbin:/bin"};
+  std::vector<std::string> child_env_storage;
+  child_env_storage.reserve(12);
+  child_env_storage.emplace_back("PATH=/usr/sbin:/usr/bin:/sbin:/bin");
+  if (confirmation_required) {
+    child_env_storage.emplace_back("HOWDY_CONFIRM_AUTH=1");
+  }
   auto copy_env = [&child_env_storage](const char *name) {
     const char *value = std::getenv(name);
     if (value != nullptr) {
