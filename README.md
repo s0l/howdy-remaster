@@ -66,103 +66,13 @@ gh auth login
 Run this from the repository root:
 
 ```bash
-set -euo pipefail
-
-VERSION="${VERSION:-3.0.0+opencv-local}"
-ARCH="${ARCH:-amd64}"
-BUILD_DIR="dist/howdy-deb-build"
-ROOT_DIR="dist/howdy-deb-root"
-DEB_PATH="dist/howdy-opencv-sface_${VERSION}_${ARCH}.deb"
-
-rm -rf "$BUILD_DIR" "$ROOT_DIR" "$DEB_PATH"
-
-meson setup "$BUILD_DIR" \
-  --prefix=/usr \
-  --buildtype=release \
-  -Dconfig_dir=/etc/howdy \
-  -Ddlib_data_dir=/etc/howdy/dlib-data \
-  -Dface_data_dir=/etc/howdy/face-models \
-  -Duser_models_dir=/etc/howdy/models \
-  -Dpy_sources_dir=/lib/security \
-  -Dpam_dir=/lib/security \
-  -Dinstall_pam_config=true
-
-meson compile -C "$BUILD_DIR"
-DESTDIR="$PWD/$ROOT_DIR" meson install -C "$BUILD_DIR" --no-rebuild
-
-mkdir -p \
-  "$ROOT_DIR/DEBIAN" \
-  "$ROOT_DIR/etc/howdy/models" \
-  "$ROOT_DIR/var/cache/howdy" \
-  "$ROOT_DIR/var/log/howdy/snapshots"
-
-install -m 0644 howdy/src/config.ini "$ROOT_DIR/etc/howdy/config.ini"
-
-cat > "$ROOT_DIR/DEBIAN/control" <<EOF
-Package: howdy
-Version: $VERSION
-Section: misc
-Priority: optional
-Architecture: $ARCH
-Maintainer: local <root@localhost>
-Installed-Size: 39000
-Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libevdev2, libinih1, python3, python3-numpy, python3-opencv, python3-gi, gir1.2-gtk-3.0, curl | wget
-Recommends: v4l-utils
-Conflicts: howdy-gtk
-Replaces: howdy-gtk
-Provides: howdy
-Description: Windows Hello style authentication for Linux, OpenCV SFace build
- Howdy uses a camera and local face recognition to authenticate users.
- This build uses OpenCV YuNet and SFace ONNX models instead of dlib.
-EOF
-
-cat > "$ROOT_DIR/DEBIAN/postinst" <<'EOF'
-#!/bin/sh
-set -e
-
-mkdir -p /etc/howdy/models /var/cache/howdy /var/log/howdy /var/log/howdy/snapshots
-
-if [ -f /usr/local/bin/howdy ] && grep -q "/usr/local/lib/.*/howdy/cli.py" /usr/local/bin/howdy 2>/dev/null; then
-	rm -f /usr/local/bin/howdy
-fi
-
-chown -R root:root /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /var/cache/howdy /var/log/howdy
-chown root:root /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
-
-chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models /var/log/howdy /var/log/howdy/snapshots
-chmod 700 /etc/howdy/models /var/cache/howdy
-chmod 755 /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
-
-if command -v pam-auth-update >/dev/null 2>&1; then
-	pam-auth-update --package || true
-fi
-
-exit 0
-EOF
-
-cat > "$ROOT_DIR/DEBIAN/prerm" <<'EOF'
-#!/bin/sh
-set -e
-
-if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
-	if command -v pam-auth-update >/dev/null 2>&1; then
-		pam-auth-update --package || true
-	fi
-fi
-
-exit 0
-EOF
-
-chmod 755 "$ROOT_DIR/DEBIAN/postinst" "$ROOT_DIR/DEBIAN/prerm"
-dpkg-deb --build --root-owner-group "$ROOT_DIR" "$DEB_PATH"
-
-echo "Built $DEB_PATH"
+./scripts/build-deb.sh
 ```
 
-To use a different package version, set `VERSION` before running the block:
+The package version is stored in `VERSION`. To override it for a local build:
 
 ```bash
-VERSION=3.0.0+opencv6
+VERSION=3.0.0+local ./scripts/build-deb.sh
 ```
 
 There is no separate dlib build step. The OpenCV YuNet/SFace ONNX files are
@@ -171,7 +81,7 @@ installed from `howdy/src/face-models`.
 ## Install The Package
 
 ```bash
-sudo apt install ./dist/howdy-opencv-sface_3.0.0+opencv-local_amd64.deb
+sudo apt install ./dist/howdy-opencv-sface_$(cat VERSION)_amd64.deb
 hash -r
 ```
 
@@ -179,16 +89,16 @@ If you built with a different `VERSION`, use the matching filename.
 
 The package installs the PAM config through `pam-auth-update --package`.
 
-## Configure Camera
+## Camera Selection
 
-The default config uses:
+No camera configuration is normally needed. The default config uses:
 
 ```ini
-device_path = none
+device_path = auto
 ```
 
-`none` and `auto` both enable automatic camera selection. The resolver scores
-available V4L devices and prefers likely IR cameras:
+`auto` means: find a suitable camera automatically. Howdy scans available V4L
+devices, scores them, and prefers likely IR cameras:
 
 - names containing `infrared` or `ir`
 - names containing `depth`
@@ -202,10 +112,14 @@ After the first successful auto-detection, Howdy caches the selected device in:
 /var/cache/howdy/device_path
 ```
 
-Normal PAM authentication uses the cached camera directly. A full device scan is
-only retried when the cached device is missing or cannot be opened.
+Normal PAM authentication uses the cached camera directly. It does not rescan all
+video devices unless the cached camera is missing or cannot be opened.
 
-To force a manual camera path:
+`none` is still accepted as a legacy synonym for `auto`, but new configs should
+use `auto`.
+
+Manual configuration is only an escape hatch if auto-detection chooses the wrong
+device:
 
 ```bash
 sudo howdy config
