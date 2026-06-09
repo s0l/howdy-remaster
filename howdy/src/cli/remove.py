@@ -5,7 +5,9 @@ import sys
 import os
 import json
 import builtins
+import subprocess
 import paths_factory
+import lockscreen_permissions
 
 from i18n import _
 
@@ -72,6 +74,10 @@ if not found:
 # Remove the entire file if this encoding is the only one
 if len(encodings) == 1:
 	os.remove(paths_factory.user_model_path(user))
+	try:
+		lockscreen_permissions.revoke_lockscreen_model_access(user, enc_file)
+	except (KeyError, OSError, subprocess.SubprocessError):
+		pass
 	print(_("Removed last model, howdy disabled for user"))
 else:
 	# A place holder to contain the encodings that will remain
@@ -85,5 +91,9 @@ else:
 	# Save this new set to disk
 	with open(enc_file, "w") as datafile:
 		json.dump(new_encodings, datafile)
+	try:
+		lockscreen_permissions.grant_lockscreen_model_access(user, enc_file)
+	except (KeyError, OSError, subprocess.SubprocessError):
+		print(_("NOTICE: Could not grant KDE lockscreen read access to the face model"))
 
 	print(_("Removed model {}").format(id))

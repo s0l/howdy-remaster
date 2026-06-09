@@ -45,7 +45,7 @@ Priority: optional
 Architecture: $arch
 Maintainer: local <root@localhost>
 Installed-Size: 39000
-Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libevdev2, libinih1, python3, python3-numpy, python3-opencv, python3-gi, gir1.2-gtk-3.0, curl | wget
+Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libevdev2, libinih1, python3, python3-numpy, python3-opencv, python3-gi, gir1.2-gtk-3.0, acl, curl | wget
 Recommends: v4l-utils
 Conflicts: howdy-gtk
 Replaces: howdy-gtk
@@ -74,6 +74,19 @@ chmod 700 /etc/howdy/models /var/cache/howdy
 chmod 700 /var/log/howdy /var/log/howdy/snapshots
 chmod 644 /etc/howdy/config.ini
 chmod 755 /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
+
+if command -v setfacl >/dev/null 2>&1; then
+	for model_file in /etc/howdy/models/*.dat; do
+		[ -e "$model_file" ] || continue
+		user="${model_file##*/}"
+		user="${user%.dat}"
+		uid="$(id -u -- "$user" 2>/dev/null || true)"
+		if [ -n "$uid" ]; then
+			setfacl -m "u:$uid:--x" /etc/howdy/models || true
+			setfacl -m "u:$uid:r--" "$model_file" || true
+		fi
+	done
+fi
 
 if command -v pam-auth-update >/dev/null 2>&1; then
 	pam-auth-update --package || true

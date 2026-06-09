@@ -4,7 +4,9 @@
 import os
 import sys
 import builtins
+import subprocess
 import paths_factory
+import lockscreen_permissions
 
 from i18n import _
 
@@ -33,5 +35,10 @@ if not builtins.howdy_args.y:
 		sys.exit(1)
 
 # Delete otherwise
-os.remove(paths_factory.user_model_path(user))
+model_path = paths_factory.user_model_path(user)
+os.remove(model_path)
+try:
+	lockscreen_permissions.revoke_lockscreen_model_access(user, model_path)
+except (KeyError, OSError, subprocess.SubprocessError):
+	pass
 print(_("\nModels cleared"))

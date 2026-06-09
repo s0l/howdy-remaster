@@ -180,6 +180,12 @@ prompts such as `sudo`. On the SDDM greeter and Plasma lock screen it may not be
 shown because those processes run in a restricted display-manager environment.
 Password authentication should remain available as the fallback path.
 
+Plasma's lock screen uses KScreenLocker and the PAM service `kde`. Unlike `sudo`,
+the lock-screen greeter authenticates as the locked user, so the package grants
+that user read-only ACL access to their own `/etc/howdy/models/<user>.dat` file
+and traverse-only ACL access to `/etc/howdy/models`. It does not make the model
+directory world-readable.
+
 If the display manager shows PAM informational messages, enabling
 `detection_notice` in `/etc/howdy/config.ini` may display a short facial
 authentication notice. Some SDDM themes ignore those messages and only show

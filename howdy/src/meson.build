@@ -32,6 +32,7 @@ py_sources = [
     'face_backends/__init__.py',
     'face_backends/opencv_sface.py',
     'i18n.py',
+    'lockscreen_permissions.py',
     'paths_factory.py',
     'recorders/__init__.py',
     'recorders/ffmpeg_reader.py',
