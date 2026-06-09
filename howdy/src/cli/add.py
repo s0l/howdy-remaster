@@ -7,8 +7,10 @@ import sys
 import json
 import configparser
 import builtins
+import subprocess
 import numpy as np
 import paths_factory
+import lockscreen_permissions
 
 from face_backends import load_face_backend
 from recorders.video_capture import VideoCapture
@@ -187,6 +189,11 @@ encodings.append(insert_model)
 # Save the new encodings to disk
 with open(enc_file, "w") as datafile:
 	json.dump(encodings, datafile)
+
+try:
+	lockscreen_permissions.grant_lockscreen_model_access(user, enc_file)
+except (KeyError, OSError, subprocess.SubprocessError):
+	print(_("NOTICE: Could not grant KDE lockscreen read access to the face model"))
 
 # Give let the user know how it went
 print(_("""\nScan complete

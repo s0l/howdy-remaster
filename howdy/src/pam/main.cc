@@ -260,7 +260,17 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
   bindtextdomain(GETTEXT_PACKAGE, LOCALEDIR);
   textdomain(GETTEXT_PACKAGE);
 
-  if (config.GetBoolean("core", "detection_notice", true)) {
+  const char *service = nullptr;
+  const void *service_ptr = nullptr;
+  if (pam_get_item(pamh, PAM_SERVICE, &service_ptr) == PAM_SUCCESS) {
+    service = static_cast<const char *>(service_ptr);
+  }
+
+  bool show_detection_notice =
+      config.GetBoolean("core", "detection_notice", true) ||
+      (service != nullptr && std::string(service) == "kde");
+
+  if (show_detection_notice) {
     if ((conv_function(PAM_TEXT_INFO, S("Attempting facial authentication"))) !=
         PAM_SUCCESS) {
       syslog(LOG_ERR, "Failed to send detection notice");
