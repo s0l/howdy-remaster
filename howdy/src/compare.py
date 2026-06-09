@@ -116,6 +116,20 @@ def compatible_encodings(raw_models, backend):
     return labels, encodings
 
 
+def format_scan_status(scanned_frames: int, skipped_black: int, skipped_dark: int) -> str:
+    frame_label = "frame" if scanned_frames == 1 else "frames"
+    skipped = []
+    if skipped_black:
+        skipped.append("%d black" % skipped_black)
+    if skipped_dark:
+        skipped.append("%d dark" % skipped_dark)
+
+    message = "Scanned %d %s" % (scanned_frames, frame_label)
+    if skipped:
+        message += " (skipped %s)" % ", ".join(skipped)
+    return message
+
+
 def print_end_report(match, match_index, labels, frame):
     def print_timing(label, key):
         print("  %s: %dms" % (label, round(timings[key] * 1000)))
@@ -241,11 +255,6 @@ dark_running_total = 0
 while True:
     frames += 1
 
-    ui_subtext = "Scanned " + str(valid_frames - dark_tries) + " frames"
-    if dark_tries > 1:
-        ui_subtext += " (skipped " + str(dark_tries) + " dark frames)"
-    send_to_ui("S", ui_subtext)
-
     elapsed = time.time() - timings["fr"]
     if elapsed > timeout:
         if save_failed:
@@ -292,6 +301,7 @@ while True:
 
     if (hist_total == 0) or (darkness == 100):
         black_tries += 1
+        send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
 
     dark_running_total += darkness
@@ -299,7 +309,10 @@ while True:
 
     if darkness > dark_threshold:
         dark_tries += 1
+        send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
+
+    send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
 
     if scaling_factor != 1:
         frame = cv2.resize(
