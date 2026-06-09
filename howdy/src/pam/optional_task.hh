@@ -4,6 +4,7 @@
 #include <cassert>
 #include <chrono>
 #include <future>
+#include <pthread.h>
 #include <thread>
 
 // A task executed only if activated.
@@ -62,16 +63,16 @@ template <typename T> void optional_task<T>::stop(bool force) {
     return;
   }
 
-  // We use pthread to cancel the thread
   if (force) {
     auto native_hd = thread.native_handle();
     pthread_cancel(native_hd);
   }
+
   thread.join();
   is_active = false;
 }
 
-template <typename T> optional_task<T>::~optional_task<T>() {
+template <typename T> optional_task<T>::~optional_task() {
   if (is_active && spawned) {
     stop(false);
   }

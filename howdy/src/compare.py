@@ -1,385 +1,371 @@
 # Compare incoming video with known faces
 # Running in a local python instance to get around PATH issues
 
-# Import time so we can start timing asap
-import time
-
-# Start timing
-timings = {
-	"st": time.time()
-}
-
-# Import required modules
-import sys
-import os
-import json
-import configparser
-import dlib
-import cv2
-from datetime import timezone, datetime
 import atexit
+import configparser
+import json
+import logging
+import os
 import subprocess
-import snapshot
+import sys
+import time
+from datetime import datetime, timezone
+
+import cv2
 import numpy as np
-import _thread as thread
+
 import paths_factory
-from recorders.video_capture import VideoCapture
+import snapshot
+from face_backends import load_face_backend
 from i18n import _
-
-def exit(code=None):
-	"""Exit while closing howdy-gtk properly"""
-	global gtk_proc
-
-	# Exit the auth ui process if there is one
-	if "gtk_proc" in globals():
-		gtk_proc.terminate()
-
-	# Exit compare
-	if code is not None:
-		sys.exit(code)
+from recorders.video_capture import VideoCapture
 
 
-def init_detector(lock):
-	"""Start face detector, encoder and predictor in a new thread"""
-	global face_detector, pose_predictor, face_encoder
+def setup_logger():
+    log_dir = "/var/log/howdy"
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        logging.basicConfig(
+            filename=os.path.join(log_dir, "compare.log"),
+            level=logging.DEBUG,
+            format="%(asctime)s - %(levelname)s - %(message)s",
+        )
+    except PermissionError:
+        logging.basicConfig(level=logging.CRITICAL)
 
-	# Test if at lest 1 of the data files is there and abort if it's not
-	if not os.path.isfile(paths_factory.shape_predictor_5_face_landmarks_path()):
-		print(_("Data files have not been downloaded, please run the following commands:"))
-		print("\n\tcd " + paths_factory.dlib_data_dir_path())
-		print("\tsudo ./install.sh\n")
-		lock.release()
-		exit(1)
-
-	# Use the CNN detector if enabled
-	if use_cnn:
-		face_detector = dlib.cnn_face_detection_model_v1(paths_factory.mmod_human_face_detector_path())
-	else:
-		face_detector = dlib.get_frontal_face_detector()
-
-	# Start the others regardless
-	pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-	face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
-
-	# Note the time it took to initialize detectors
-	timings["ll"] = time.time() - timings["ll"]
-	lock.release()
+    return logging.getLogger("howdy.compare")
 
 
-def make_snapshot(type):
-	"""Generate snapshot after detection"""
-	snapshot.generate(snapframes, [
-		type + _(" LOGIN"),
-		_("Date: ") + datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC"),
-		_("Scan time: ") + str(round(time.time() - timings["fr"], 2)) + "s",
-		_("Frames: ") + str(frames) + " (" + str(round(frames / (time.time() - timings["fr"]), 2)) + "FPS)",
-		_("Hostname: ") + os.uname().nodename,
-		_("Best certainty value: ") + str(round(lowest_certainty * 10, 1))
-	])
+logger = setup_logger()
+timings = {"st": time.time()}
+DEFAULT_TIMEOUT = 10
 
 
-def send_to_ui(type, message):
-	"""Send message to the auth ui"""
-	global gtk_proc
+def exit(code: int | None = None) -> None:
+    """Exit while closing howdy-gtk properly"""
+    global gtk_proc
 
-	# Only execute of the process started
-	if "gtk_proc" in globals():
-		# Format message so the ui can parse it
-		message = type + "=" + message + " \n"
+    if "gtk_proc" in globals() and gtk_proc is not None:
+        try:
+            gtk_proc.terminate()
+        except Exception as err:
+            logger.warning("Failed to terminate gtk_proc: %s", err)
 
-		# Try to send the message to the auth ui, but it's okay if that fails
-		try:
-			if gtk_proc.poll() is None: # Make sure the gtk_proc is still running before write into the pipe
-				gtk_proc.stdin.write(bytearray(message.encode("utf-8")))
-				gtk_proc.stdin.flush()
-		except IOError:
-			pass
+    if code is not None:
+        sys.exit(code)
 
 
-# Make sure we were given an username to test against
+def make_snapshot(type: str) -> None:
+    """Generate snapshot after detection"""
+    snapshot.generate(
+        snapframes,
+        [
+            type + _(" LOGIN"),
+            _("Date: ") + datetime.now(timezone.utc).strftime("%Y/%m/%d %H:%M:%S UTC"),
+            _("Scan time: ") + str(round(time.time() - timings["fr"], 2)) + "s",
+            _("Frames: ")
+            + str(frames)
+            + " ("
+            + str(round(frames / max(time.time() - timings["fr"], 0.001), 2))
+            + "FPS)",
+            _("Hostname: ") + os.uname().nodename,
+            _("Best score: ") + str(round(best_score, 3)),
+        ],
+    )
+
+
+def send_to_ui(type: str, message: str) -> None:
+    """Send message to the auth ui"""
+    global gtk_proc
+
+    if "gtk_proc" not in globals():
+        return
+
+    message = type + "=" + message + " \n"
+
+    try:
+        if gtk_proc.poll() is None:
+            gtk_proc.stdin.write(bytearray(message.encode("utf-8")))
+            gtk_proc.stdin.flush()
+    except IOError:
+        pass
+
+
+def compatible_encodings(raw_models, backend):
+    labels = []
+    encodings = []
+
+    for model in raw_models:
+        if model.get("backend") != backend.name:
+            continue
+
+        for encoding in model.get("data", []):
+            encodings.append(encoding)
+            labels.append(model)
+
+    return labels, encodings
+
+
+def print_end_report(match, match_index, labels, frame):
+    def print_timing(label, key):
+        print("  %s: %dms" % (label, round(timings[key] * 1000)))
+
+    print(_("Time spent"))
+    print_timing(_("Starting up"), "in")
+    print(_("  Open cam + load libs: %dms") % (round(max(timings["ll"], timings["ic"]) * 1000,)))
+    print_timing(_("  Opening the camera"), "ic")
+    print_timing(_("  Importing recognition libs"), "ll")
+    print_timing(_("Searching for known face"), "fl")
+    print_timing(_("Total time"), "tt")
+
+    print(_("\nResolution"))
+    width = video_capture.fw or 1
+    print(_("  Native: %dx%d") % (height, width))
+    scale_height, scale_width = frame.shape[:2]
+    print(_("  Used: %dx%d") % (scale_height, scale_width))
+
+    print(_("\nFrames searched: %d (%.2f fps)") % (frames, frames / max(timings["fl"], 0.001)))
+    print(_("Black frames ignored: %d ") % (black_tries,))
+    print(_("Dark frames ignored: %d ") % (dark_tries,))
+    print(_("Winning score: %.3f") % (match,))
+    print(_('Winning model: %d ("%s")') % (match_index, labels[match_index]["label"]))
+
+
 if len(sys.argv) < 2:
-	exit(12)
+    exit(12)
 
-# The username of the user being authenticated
 user = sys.argv[1]
-# The model file contents
 models = []
-# Encoded face models
 encodings = []
-# Amount of ignored 100% black frames
+labels = []
 black_tries = 0
-# Amount of ignored dark frames
 dark_tries = 0
-# Total amount of frames captured
 frames = 0
-# Captured frames for snapshot capture
 snapframes = []
-# Tracks the lowest certainty value in the loop
-lowest_certainty = 10
-# Face recognition/detection instances
-face_detector = None
-pose_predictor = None
-face_encoder = None
+best_score = 0.0
+gtk_proc = None
 
-# Try to load the face model from the models folder
-try:
-	models = json.load(open(paths_factory.user_model_path(user)))
-
-	for model in models:
-		encodings += model["data"]
-except FileNotFoundError:
-	exit(10)
-
-# Check if the file contains a model
-if len(models) < 1:
-	exit(10)
-
-# Read config from disk
 config = configparser.ConfigParser()
 config.read(paths_factory.config_file_path())
 
-# Get all config values needed
-use_cnn = config.getboolean("core", "use_cnn", fallback=False)
-timeout = config.getint("video", "timeout", fallback=4)
+timings["ll"] = time.time()
+try:
+    face_backend = load_face_backend(config)
+except (FileNotFoundError, ValueError) as err:
+    print(err)
+    logger.error("Could not initialize face backend: %s", err)
+    exit(1)
+timings["ll"] = time.time() - timings["ll"]
+
+try:
+    with open(paths_factory.user_model_path(user)) as f:
+        models = json.load(f)
+except FileNotFoundError:
+    exit(10)
+
+if len(models) < 1:
+    exit(10)
+
+labels, encodings = compatible_encodings(models, face_backend)
+if not encodings:
+    print(
+        _("No face models for backend {backend}, please run howdy add again").format(
+            backend=face_backend.name
+        )
+    )
+    logger.error("No compatible face models for backend %s", face_backend.name)
+    exit(10)
+
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
-video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
 end_report = config.getboolean("debug", "end_report", fallback=False)
 save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
 
-# Send the gtk output to the terminal if enabled in the config
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
 
-# Start the auth ui, register it to be always be closed on exit
 try:
-	gtk_proc = subprocess.Popen(["howdy-gtk", "--start-auth-ui"], stdin=subprocess.PIPE, stdout=gtk_pipe, stderr=gtk_pipe)
-	atexit.register(exit)
+    gtk_proc = subprocess.Popen(
+        ["howdy-gtk", "--start-auth-ui"],
+        stdin=subprocess.PIPE,
+        stdout=gtk_pipe,
+        stderr=gtk_pipe,
+        start_new_session=True,
+    )
+    atexit.register(exit)
 except FileNotFoundError:
-	pass
+    pass
 
-# Write to the stdin to redraw ui
 send_to_ui("M", _("Starting up..."))
 
-# Save the time needed to start the script
 timings["in"] = time.time() - timings["st"]
+logger.info("Face backend %s initialized", face_backend.name)
 
-# Import face recognition, takes some time
-timings["ll"] = time.time()
-
-# Start threading and wait for init to finish
-lock = thread.allocate_lock()
-lock.acquire()
-thread.start_new_thread(init_detector, (lock, ))
-
-# Start video capture on the IR camera
 timings["ic"] = time.time()
-
+logger.info("Opening video capture device")
 video_capture = VideoCapture(config)
-
-# Read exposure from config to use in the main loop
+logger.info("Video capture opened successfully")
 exposure = config.getint("video", "exposure", fallback=-1)
-
-# Note the time it took to open the camera
 timings["ic"] = time.time() - timings["ic"]
+logger.info("Camera opened in %.2fs", timings["ic"])
 
-# wait for thread to finish
-lock.acquire()
-lock.release()
-del lock
-
-# Fetch the max frame height
 max_height = config.getfloat("video", "max_height", fallback=320.0)
-
-# Get the height of the image (which would be the width if screen is portrait oriented)
 height = video_capture.internal.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
 if rotate == 2:
-	height = video_capture.internal.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
-# Calculate the amount the image has to shrink
+    height = video_capture.internal.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
 scaling_factor = (max_height / height) or 1
 
-# Fetch config settings out of the loop
-timeout = config.getint("video", "timeout", fallback=4)
+timeout = config.getint("video", "timeout", fallback=DEFAULT_TIMEOUT)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
 end_report = config.getboolean("debug", "end_report", fallback=False)
 
-# Initiate histogram equalization
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-# Let the ui know that we're ready
 send_to_ui("M", _("Identifying you..."))
 
-# Start the read loop
-frames = 0
 valid_frames = 0
 timings["fr"] = time.time()
 dark_running_total = 0
 
 while True:
-	# Increment the frame count every loop
-	frames += 1
+    frames += 1
 
-	# Form a string to let the user know we're real busy
-	ui_subtext = "Scanned " + str(valid_frames - dark_tries) + " frames"
-	if (dark_tries > 1):
-		ui_subtext += " (skipped " + str(dark_tries) + " dark frames)"
-	# Show it in the ui as subtext
-	send_to_ui("S", ui_subtext)
+    ui_subtext = "Scanned " + str(valid_frames - dark_tries) + " frames"
+    if dark_tries > 1:
+        ui_subtext += " (skipped " + str(dark_tries) + " dark frames)"
+    send_to_ui("S", ui_subtext)
 
-	# Stop if we've exceeded the time limit
-	if time.time() - timings["fr"] > timeout:
-		# Create a timeout snapshot if enabled
-		if save_failed:
-			make_snapshot(_("FAILED"))
+    elapsed = time.time() - timings["fr"]
+    if elapsed > timeout:
+        if save_failed:
+            make_snapshot(_("FAILED"))
 
-		if dark_tries == valid_frames:
-			print(_("All frames were too dark, please check dark_threshold in config"))
-			print(_("Average darkness: {avg}, Threshold: {threshold}").format(avg=str(dark_running_total / max(1, valid_frames)), threshold=str(dark_threshold)))
-			exit(13)
-		else:
-			exit(11)
+        logger.error(
+            "Timeout reached after %.2fs, scanned %d frames (%d valid, %d dark)",
+            elapsed,
+            frames,
+            valid_frames,
+            dark_tries,
+        )
 
-	# Grab a single frame of video
-	frame, gsframe = video_capture.read_frame()
-	gsframe = clahe.apply(gsframe)
+        if dark_tries == valid_frames:
+            print(_("All frames were too dark, please check dark_threshold in config"))
+            print(
+                _("Average darkness: {avg}, Threshold: {threshold}").format(
+                    avg=str(dark_running_total / max(1, valid_frames)),
+                    threshold=str(dark_threshold),
+                )
+            )
+            exit(13)
 
-	# If snapshots have been turned on
-	if save_failed or save_successful:
-		# Start capturing frames for the snapshot
-		if len(snapframes) < 3:
-			snapframes.append(frame)
+        exit(11)
 
-	# Create a histogram of the image with 8 values
-	hist = cv2.calcHist([gsframe], [0], None, [8], [0, 256])
-	# All values combined for percentage calculation
-	hist_total = np.sum(hist)
+    frame, gsframe = video_capture.read_frame()
+    gsframe = clahe.apply(gsframe)
 
-	# Calculate frame darkness
-	darkness = (hist[0] / hist_total * 100)
+    if save_failed or save_successful:
+        if len(snapframes) < 3:
+            snapframes.append(frame)
 
-	# If the image is fully black due to a bad camera read,
-	# skip to the next frame
-	if (hist_total == 0) or (darkness == 100):
-		black_tries += 1
-		continue
+    hist = cv2.calcHist([gsframe], [0], None, [8], [0, 256])
+    hist_total = np.sum(hist)
+    darkness = float(hist[0][0] / hist_total * 100)
 
-	dark_running_total += darkness
-	valid_frames += 1
+    logger.debug(
+        "Frame %d: darkness=%.1f%%, valid_frames=%d, dark_tries=%d",
+        frames,
+        darkness,
+        valid_frames,
+        dark_tries,
+    )
 
-	# If the image exceeds darkness threshold due to subject distance,
-	# skip to the next frame
-	if (darkness > dark_threshold):
-		dark_tries += 1
-		continue
+    if (hist_total == 0) or (darkness == 100):
+        black_tries += 1
+        continue
 
-	# If the height is too high
-	if scaling_factor != 1:
-		# Apply that factor to the frame
-		frame = cv2.resize(frame, None, fx=scaling_factor, fy=scaling_factor, interpolation=cv2.INTER_AREA)
-		gsframe = cv2.resize(gsframe, None, fx=scaling_factor, fy=scaling_factor, interpolation=cv2.INTER_AREA)
+    dark_running_total += darkness
+    valid_frames += 1
 
-	# If camera is configured to rotate = 1, check portrait in addition to landscape
-	if rotate == 1:
-		if frames % 3 == 1:
-			frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-			gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
-		if frames % 3 == 2:
-			frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-			gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
+    if darkness > dark_threshold:
+        dark_tries += 1
+        continue
 
-	# If camera is configured to rotate = 2, check portrait orientation
-	elif rotate == 2:
-		if frames % 2 == 0:
-			frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-			gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
-		else:
-			frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-			gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
+    if scaling_factor != 1:
+        frame = cv2.resize(
+            frame,
+            None,
+            fx=scaling_factor,
+            fy=scaling_factor,
+            interpolation=cv2.INTER_AREA,
+        )
+        gsframe = cv2.resize(
+            gsframe,
+            None,
+            fx=scaling_factor,
+            fy=scaling_factor,
+            interpolation=cv2.INTER_AREA,
+        )
 
-	# Get all faces from that frame as encodings
-	# Upsamples 1 time
-	face_locations = face_detector(gsframe, 1)
-	# Loop through each face
-	for fl in face_locations:
-		if use_cnn:
-			fl = fl.rect
+    if rotate == 1:
+        if frames % 3 == 1:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if frames % 3 == 2:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
+    elif rotate == 2:
+        if frames % 2 == 0:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        else:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
 
-		# Fetch the faces in the image
-		face_landmark = pose_predictor(frame, fl)
-		face_encoding = np.array(face_encoder.compute_face_descriptor(frame, face_landmark, 1))
+    face_locations = face_backend.detect(frame, gsframe)
+    logger.debug("Frame %d: detected %d face(s)", frames, len(face_locations))
 
-		# Match this found face against a known face
-		matches = np.linalg.norm(encodings - face_encoding, axis=1)
+    for face_location in face_locations:
+        face_encoding = face_backend.encode(frame, face_location)
+        match_index, match = face_backend.match(encodings, face_encoding)
 
-		# Get best match
-		match_index = np.argmin(matches)
-		match = matches[match_index]
+        if match is None:
+            continue
 
-		# Update certainty if we have a new low
-		if lowest_certainty > match:
-			lowest_certainty = match
+        if best_score < match:
+            best_score = match
 
-		# Check if a match that's confident enough
-		if 0 < match < video_certainty:
-			timings["tt"] = time.time() - timings["st"]
-			timings["fl"] = time.time() - timings["fr"]
+        logger.debug(
+            "Frame %d: best match score=%.3f (threshold=%.3f)",
+            frames,
+            match,
+            face_backend.match_threshold,
+        )
 
-			# If set to true in the config, print debug text
-			if end_report:
-				def print_timing(label, k):
-					"""Helper function to print a timing from the list"""
-					print("  %s: %dms" % (label, round(timings[k] * 1000)))
+        if face_backend.is_match(match):
+            timings["tt"] = time.time() - timings["st"]
+            timings["fl"] = time.time() - timings["fr"]
 
-				# Print a nice timing report
-				print(_("Time spent"))
-				print_timing(_("Starting up"), "in")
-				print(_("  Open cam + load libs: %dms") % (round(max(timings["ll"], timings["ic"]) * 1000, )))
-				print_timing(_("  Opening the camera"), "ic")
-				print_timing(_("  Importing recognition libs"), "ll")
-				print_timing(_("Searching for known face"), "fl")
-				print_timing(_("Total time"), "tt")
+            logger.info(
+                'Face matched model "%s" with score %.3f in %.2fs',
+                labels[match_index]["label"],
+                match,
+                timings["fl"],
+            )
 
-				print(_("\nResolution"))
-				width = video_capture.fw or 1
-				print(_("  Native: %dx%d") % (height, width))
-				# Save the new size for diagnostics
-				scale_height, scale_width = frame.shape[:2]
-				print(_("  Used: %dx%d") % (scale_height, scale_width))
+            if end_report:
+                print_end_report(match, match_index, labels, frame)
 
-				# Show the total number of frames and calculate the FPS by dividing it by the total scan time
-				print(_("\nFrames searched: %d (%.2f fps)") % (frames, frames / timings["fl"]))
-				print(_("Black frames ignored: %d ") % (black_tries, ))
-				print(_("Dark frames ignored: %d ") % (dark_tries, ))
-				print(_("Certainty of winning frame: %.3f") % (match * 10, ))
+            if save_successful:
+                make_snapshot(_("SUCCESSFUL"))
 
-				print(_("Winning model: %d (\"%s\")") % (match_index, models[match_index]["label"]))
+            if config.getboolean("rubberstamps", "enabled", fallback=False):
+                print(_("Rubberstamps are not supported by the opencv_sface backend yet"))
+                logger.error("Rubberstamps requested with unsupported backend")
+                exit(15)
 
-			# Make snapshot if enabled
-			if save_successful:
-				make_snapshot(_("SUCCESSFUL"))
+            exit(0)
 
-			# Run rubberstamps if enabled
-			if config.getboolean("rubberstamps", "enabled", fallback=False):
-				import rubberstamps
-
-				send_to_ui("S", "")
-
-				if "gtk_proc" not in vars():
-					gtk_proc = None
-
-				rubberstamps.execute(config, gtk_proc, {
-					"video_capture": video_capture,
-					"face_detector": face_detector,
-					"pose_predictor": pose_predictor,
-					"clahe": clahe
-				})
-
-			# End peacefully
-			exit(0)
-
-	if exposure != -1:
-		# For a strange reason on some cameras (e.g. Lenoxo X1E) setting manual exposure works only after a couple frames
-		# are captured and even after a delay it does not always work. Setting exposure at every frame is reliable though.
-		video_capture.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)  # 1 = Manual
-		video_capture.internal.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+    if exposure != -1:
+        video_capture.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)
+        video_capture.internal.set(cv2.CAP_PROP_EXPOSURE, float(exposure))

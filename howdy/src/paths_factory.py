@@ -7,6 +7,11 @@ models = [
     "dlib_face_recognition_resnet_model_v1.dat",
 ]
 
+opencv_sface_models = [
+    "face_detection_yunet_2023mar.onnx",
+    "face_recognition_sface_2021dec.onnx",
+]
+
 
 def dlib_data_dir_path() -> str:
     return str(paths.dlib_data_dir)
@@ -22,6 +27,18 @@ def mmod_human_face_detector_path() -> str:
 
 def dlib_face_recognition_resnet_model_v1_path() -> str:
     return str(paths.dlib_data_dir / models[2])
+
+
+def face_data_dir_path() -> str:
+    return str(paths.face_data_dir)
+
+
+def face_detection_yunet_path() -> str:
+    return str(paths.face_data_dir / opencv_sface_models[0])
+
+
+def face_recognition_sface_path() -> str:
+    return str(paths.face_data_dir / opencv_sface_models[1])
 
 
 def user_model_path(user: str) -> str:
