@@ -1,0 +1,257 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - opencv-sface-backend
+      - ci-github-actions
+
+jobs:
+  python:
+    name: python
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Install Python runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-gi \
+            python3-numpy \
+            python3-opencv
+
+      - name: Compile Python sources
+        run: |
+          python3 -m py_compile \
+            howdy/src/cli.py \
+            howdy/src/compare.py \
+            howdy/src/i18n.py \
+            howdy/src/paths_factory.py \
+            howdy/src/snapshot.py \
+            howdy/src/cli/*.py \
+            howdy/src/face_backends/*.py \
+            howdy/src/recorders/*.py \
+            howdy/src/rubberstamps/*.py \
+            howdy-gtk/src/*.py
+
+      - name: Check OpenCV SFace APIs
+        run: |
+          python3 - <<'PY'
+          import cv2
+
+          missing = [
+              name
+              for name in ["FaceDetectorYN", "FaceRecognizerSF"]
+              if not hasattr(cv2, name)
+          ]
+          if missing:
+              raise SystemExit("OpenCV is missing required APIs: " + ", ".join(missing))
+          PY
+
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            meson \
+            ninja-build \
+            pkg-config \
+            libpam0g-dev \
+            libevdev-dev \
+            libinih-dev \
+            libopencv-dev \
+            libopencv-contrib-dev \
+            python3 \
+            python3-gi \
+            python3-numpy \
+            python3-opencv \
+            gir1.2-gtk-3.0
+
+      - name: Configure Meson
+        run: |
+          meson setup build \
+            --prefix=/usr \
+            --buildtype=release \
+            -Dconfig_dir=/etc/howdy \
+            -Ddlib_data_dir=/etc/howdy/dlib-data \
+            -Dface_data_dir=/etc/howdy/face-models \
+            -Duser_models_dir=/etc/howdy/models \
+            -Dpy_sources_dir=/lib/security \
+            -Dpam_dir=/lib/security \
+            -Dinstall_pam_config=true
+
+      - name: Build PAM module and generated files
+        run: meson compile -C build
+
+  package:
+    name: package
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Install package build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            meson \
+            ninja-build \
+            pkg-config \
+            dpkg-dev \
+            libpam0g-dev \
+            libevdev-dev \
+            libinih-dev \
+            libopencv-dev \
+            libopencv-contrib-dev \
+            python3 \
+            python3-gi \
+            python3-numpy \
+            python3-opencv \
+            gir1.2-gtk-3.0 \
+            curl
+
+      - name: Build Debian package
+        run: |
+          set -euo pipefail
+
+          VERSION="3.0.0+ci"
+          ARCH="amd64"
+          BUILD_DIR="dist/howdy-deb-build"
+          ROOT_DIR="dist/howdy-deb-root"
+          DEB_PATH="dist/howdy-opencv-sface_${VERSION}_${ARCH}.deb"
+
+          rm -rf "$BUILD_DIR" "$ROOT_DIR" "$DEB_PATH"
+
+          meson setup "$BUILD_DIR" \
+            --prefix=/usr \
+            --buildtype=release \
+            -Dconfig_dir=/etc/howdy \
+            -Ddlib_data_dir=/etc/howdy/dlib-data \
+            -Dface_data_dir=/etc/howdy/face-models \
+            -Duser_models_dir=/etc/howdy/models \
+            -Dpy_sources_dir=/lib/security \
+            -Dpam_dir=/lib/security \
+            -Dinstall_pam_config=true
+
+          meson compile -C "$BUILD_DIR"
+          DESTDIR="$PWD/$ROOT_DIR" meson install -C "$BUILD_DIR" --no-rebuild
+
+          mkdir -p \
+            "$ROOT_DIR/DEBIAN" \
+            "$ROOT_DIR/etc/howdy/models" \
+            "$ROOT_DIR/var/cache/howdy" \
+            "$ROOT_DIR/var/log/howdy/snapshots"
+
+          install -m 0644 howdy/src/config.ini "$ROOT_DIR/etc/howdy/config.ini"
+
+          cat > "$ROOT_DIR/DEBIAN/control" <<EOF
+          Package: howdy
+          Version: $VERSION
+          Section: misc
+          Priority: optional
+          Architecture: $ARCH
+          Maintainer: ci <ci@example.invalid>
+          Installed-Size: 39000
+          Depends: libc6, libgcc-s1, libstdc++6, libpam0g, libevdev2, libinih1, python3, python3-numpy, python3-opencv, python3-gi, gir1.2-gtk-3.0, curl | wget
+          Recommends: v4l-utils
+          Conflicts: howdy-gtk
+          Replaces: howdy-gtk
+          Provides: howdy
+          Description: Windows Hello style authentication for Linux, OpenCV SFace build
+           Howdy uses a camera and local face recognition to authenticate users.
+           This build uses OpenCV YuNet and SFace ONNX models instead of dlib.
+          EOF
+
+          cat > "$ROOT_DIR/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          mkdir -p /etc/howdy/models /var/cache/howdy /var/log/howdy /var/log/howdy/snapshots
+          if [ -f /usr/local/bin/howdy ] && grep -q "/usr/local/lib/.*/howdy/cli.py" /usr/local/bin/howdy 2>/dev/null; then
+          	rm -f /usr/local/bin/howdy
+          fi
+          chown -R root:root /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /var/cache/howdy /var/log/howdy
+          chown root:root /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
+          chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models /var/log/howdy /var/log/howdy/snapshots
+          chmod 700 /etc/howdy/models /var/cache/howdy
+          chmod 755 /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
+          if command -v pam-auth-update >/dev/null 2>&1; then
+          	pam-auth-update --package || true
+          fi
+          exit 0
+          EOF
+
+          cat > "$ROOT_DIR/DEBIAN/prerm" <<'EOF'
+          #!/bin/sh
+          set -e
+          if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
+          	if command -v pam-auth-update >/dev/null 2>&1; then
+          		pam-auth-update --package || true
+          	fi
+          fi
+          exit 0
+          EOF
+
+          chmod 755 "$ROOT_DIR/DEBIAN/postinst" "$ROOT_DIR/DEBIAN/prerm"
+          dpkg-deb --build --root-owner-group "$ROOT_DIR" "$DEB_PATH"
+
+      - name: Inspect package contents
+        run: |
+          set -euo pipefail
+          DEB_PATH="dist/howdy-opencv-sface_3.0.0+ci_amd64.deb"
+
+          dpkg-deb -I "$DEB_PATH"
+          dpkg-deb -c "$DEB_PATH" | tee package-contents.txt
+
+          grep -F "./lib/security/pam_howdy.so" package-contents.txt
+          grep -F "./lib/security/howdy/compare.py" package-contents.txt
+          grep -F "./lib/security/howdy/face_backends/opencv_sface.py" package-contents.txt
+          grep -F "./etc/howdy/face-models/face_detection_yunet_2023mar.onnx" package-contents.txt
+          grep -F "./etc/howdy/face-models/face_recognition_sface_2021dec.onnx" package-contents.txt
+          grep -F "./var/cache/howdy/" package-contents.txt
+
+      - name: Simulate package installation
+        run: sudo apt-get install --simulate ./dist/howdy-opencv-sface_3.0.0+ci_amd64.deb
+
+  repo-hygiene:
+    name: repo-hygiene
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Reject generated artifacts
+        run: |
+          set -euo pipefail
+          bad_files="$(find . \
+            -path './.git' -prune -o \
+            \( -name '*.pyc' -o -name '__pycache__' -o -path './build/*' -o -path './dist/*' \) \
+            -print)"
+          if [ -n "$bad_files" ]; then
+            echo "$bad_files"
+            exit 1
+          fi
+
+      - name: Reject dlib runtime imports
+        run: |
+          if find howdy/src -type f ! -path '*/dlib-data/*' -print0 \
+            | xargs -0 grep --line-number -E '(^|[[:space:]])(import dlib|from dlib)'; then
+            echo "Runtime dlib imports are not allowed in the OpenCV backend build."
+            exit 1
+          fi
