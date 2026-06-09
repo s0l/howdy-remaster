@@ -15,6 +15,7 @@ MAX_WIDTH = 300
 
 
 def _load_device_resolver():
+    opencv_capture_source = None
     current_dir = Path(__file__).resolve().parent
     for candidate in [
         current_dir.parent.parent / "howdy",
@@ -25,11 +26,11 @@ def _load_device_resolver():
             sys.path.insert(0, str(candidate))
 
     try:
-        from recorders.video_capture import resolve_device_path
+        from recorders.video_capture import opencv_capture_source, resolve_device_path
     except ImportError:
-        return None
+        return None, None
 
-    return resolve_device_path
+    return resolve_device_path, opencv_capture_source
 
 
 def on_page_switch(self, notebook, page, page_num):
@@ -41,7 +42,7 @@ def on_page_switch(self, notebook, page, page_num):
             print(_("Can't open camera"))
             return
 
-        resolve_device_path = _load_device_resolver()
+        resolve_device_path, opencv_capture_source = _load_device_resolver()
         if resolve_device_path is None:
             path = self.config.get("video", "device_path", fallback="none")
         else:
@@ -55,7 +56,11 @@ def on_page_switch(self, notebook, page, page_num):
             print(_("Can't import OpenCV2"))
             return
 
-        self.capture = cv2.VideoCapture(path)
+        capture_source = path
+        if opencv_capture_source is not None:
+            capture_source = opencv_capture_source(path)
+
+        self.capture = cv2.VideoCapture(capture_source)
         if not self.capture.isOpened():
             print(_("Can't open camera"))
             self.capture.release()

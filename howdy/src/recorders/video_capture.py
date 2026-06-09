@@ -25,6 +25,16 @@ def _video_device_name(path):
 		return ""
 
 
+def opencv_capture_source(path):
+	real_path = os.path.realpath(path)
+	device = os.path.basename(real_path)
+
+	if device.startswith("video") and device[5:].isdigit():
+		return int(device[5:])
+
+	return path
+
+
 def _is_gray_frame(frame):
 	if frame is None or len(frame.shape) < 3:
 		return True
@@ -51,7 +61,7 @@ def _score_device(path, probe=True):
 	if not probe:
 		return score, name
 
-	capture = cv2.VideoCapture(path, cv2.CAP_V4L)
+	capture = cv2.VideoCapture(opencv_capture_source(path), cv2.CAP_V4L)
 	if not capture.isOpened():
 		capture.release()
 		return score - 1000, name
@@ -252,7 +262,7 @@ class VideoCapture:
 		else:
 			# Start video capture on the IR camera through OpenCV
 			self.internal = cv2.VideoCapture(
-				self.device_path,
+				opencv_capture_source(self.device_path),
 				cv2.CAP_V4L
 			)
 			# Set the capture frame rate
