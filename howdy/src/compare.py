@@ -6,6 +6,7 @@ import configparser
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -52,9 +53,13 @@ def exit(code: int | None = None) -> None:
 
     if "gtk_proc" in globals() and gtk_proc is not None:
         try:
-            gtk_proc.terminate()
+            os.killpg(gtk_proc.pid, signal.SIGTERM)
         except Exception as err:
-            logger.warning("Failed to terminate gtk_proc: %s", err)
+            logger.warning("Failed to terminate gtk_proc process group: %s", err)
+            try:
+                gtk_proc.terminate()
+            except Exception as terminate_err:
+                logger.warning("Failed to terminate gtk_proc: %s", terminate_err)
 
     if code is not None:
         sys.exit(code)

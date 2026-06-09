@@ -133,7 +133,12 @@ class StickyWindow(gtk.Window):
 	def catch_stdin(self):
 		"""Catch input from stdin and redraw"""
 		# Wait for a line on stdin
-		comm = sys.stdin.readline()[:-1]
+		comm = sys.stdin.readline()
+		if comm == "":
+			gtk.main_quit()
+			return False
+
+		comm = comm[:-1]
 
 		# If the line is not empty
 		if comm:
@@ -150,6 +155,7 @@ class StickyWindow(gtk.Window):
 
 		# Fire this function again in 10ms, as we're waiting on IO in readline anyway
 		gobject.timeout_add(10, self.catch_stdin)
+		return False
 
 	def exit(self, widget, context):
 		"""Cleanly exit"""
