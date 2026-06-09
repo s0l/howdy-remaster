@@ -346,7 +346,12 @@ while True:
             timings["tt"] = time.time() - timings["st"]
             timings["fl"] = time.time() - timings["fr"]
 
-            logger.info("Face matched with score %.3f in %.2fs", match, timings["fl"])
+            logger.info(
+                'Face matched model "%s" with score %.3f in %.2fs',
+                labels[match_index]["label"],
+                match,
+                timings["fl"],
+            )
 
             if end_report:
                 print_end_report(match, match_index, labels, frame)

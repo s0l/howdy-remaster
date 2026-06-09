@@ -53,6 +53,23 @@ def print_text(line_number, text):
 	cv2.putText(overlay, text, (10, height - 10 - (10 * line_number)), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 
 
+last_status = None
+last_status_time = 0
+
+
+def emit_status(status):
+	"""Print recognition status without flooding the terminal."""
+	global last_status, last_status_time
+
+	now = time.time()
+	if status == last_status and now - last_status_time < 1:
+		return
+
+	print(status)
+	last_status = status
+	last_status_time = now
+
+
 try:
 	face_backend = load_face_backend(config)
 except (FileNotFoundError, ValueError) as err:
@@ -168,9 +185,12 @@ try:
 			rec_tm = time.time()
 
 			# Get the locations of all faces and their locations
-			# Upsample it once
 			face_locations = face_backend.detect(frame, frame)
 			rec_tm = time.time() - rec_tm
+			frame_status = None
+
+			if not face_locations:
+				frame_status = _("NO FACE")
 
 			# Loop though all faces and paint a circle around them
 			for loc in face_locations:
@@ -201,12 +221,26 @@ try:
 						# Print the name of the model next to the circle
 						circle_text = "{} (score: {})".format(models[match_index]["label"], round(match, 3))
 						cv2.putText(overlay, circle_text, (int(x + r / 3), y - r), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
+						frame_status = _("MATCH: {label} score={score:.3f} threshold={threshold:.3f}").format(
+							label=models[match_index]["label"],
+							score=match,
+							threshold=face_backend.match_threshold,
+						)
 					# If no approved matches, show red text
 					else:
 						cv2.putText(overlay, "no match", (int(x + r / 3), y - r), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255), 0, cv2.LINE_AA)
+						frame_status = _("NO MATCH: score={score:.3f} threshold={threshold:.3f}").format(
+							score=match,
+							threshold=face_backend.match_threshold,
+						)
+				else:
+					frame_status = _("FACE DETECTED: no compatible models loaded")
 
 				# Draw the Circle in green
 				cv2.circle(overlay, (x, y), r, color, 2)
+
+			if frame_status:
+				emit_status(frame_status)
 
 		# Add the overlay to the frame with some transparency
 		alpha = 0.65
