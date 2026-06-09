@@ -6,6 +6,7 @@ import configparser
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -24,9 +25,14 @@ from recorders.video_capture import VideoCapture
 def setup_logger():
     log_dir = "/var/log/howdy"
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+        os.chmod(log_dir, 0o700)
+        log_file = os.path.join(log_dir, "compare.log")
+        fd = os.open(log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(log_file, 0o600)
         logging.basicConfig(
-            filename=os.path.join(log_dir, "compare.log"),
+            filename=log_file,
             level=logging.DEBUG,
             format="%(asctime)s - %(levelname)s - %(message)s",
         )
@@ -47,9 +53,13 @@ def exit(code: int | None = None) -> None:
 
     if "gtk_proc" in globals() and gtk_proc is not None:
         try:
-            gtk_proc.terminate()
+            os.killpg(gtk_proc.pid, signal.SIGTERM)
         except Exception as err:
-            logger.warning("Failed to terminate gtk_proc: %s", err)
+            logger.warning("Failed to terminate gtk_proc process group: %s", err)
+            try:
+                gtk_proc.terminate()
+            except Exception as terminate_err:
+                logger.warning("Failed to terminate gtk_proc: %s", terminate_err)
 
     if code is not None:
         sys.exit(code)
@@ -106,6 +116,20 @@ def compatible_encodings(raw_models, backend):
     return labels, encodings
 
 
+def format_scan_status(scanned_frames: int, skipped_black: int, skipped_dark: int) -> str:
+    frame_label = "frame" if scanned_frames == 1 else "frames"
+    skipped = []
+    if skipped_black:
+        skipped.append("%d black" % skipped_black)
+    if skipped_dark:
+        skipped.append("%d dark" % skipped_dark)
+
+    message = "Scanned %d %s" % (scanned_frames, frame_label)
+    if skipped:
+        message += " (skipped %s)" % ", ".join(skipped)
+    return message
+
+
 def print_end_report(match, match_index, labels, frame):
     def print_timing(label, key):
         print("  %s: %dms" % (label, round(timings[key] * 1000)))
@@ -160,7 +184,7 @@ timings["ll"] = time.time() - timings["ll"]
 try:
     with open(paths_factory.user_model_path(user)) as f:
         models = json.load(f)
-except FileNotFoundError:
+except (FileNotFoundError, ValueError):
     exit(10)
 
 if len(models) < 1:
@@ -187,7 +211,7 @@ gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
 
 try:
     gtk_proc = subprocess.Popen(
-        ["howdy-gtk", "--start-auth-ui"],
+        [paths_factory.gtk_bin_path(), "--start-auth-ui"],
         stdin=subprocess.PIPE,
         stdout=gtk_pipe,
         stderr=gtk_pipe,
@@ -230,11 +254,6 @@ dark_running_total = 0
 
 while True:
     frames += 1
-
-    ui_subtext = "Scanned " + str(valid_frames - dark_tries) + " frames"
-    if dark_tries > 1:
-        ui_subtext += " (skipped " + str(dark_tries) + " dark frames)"
-    send_to_ui("S", ui_subtext)
 
     elapsed = time.time() - timings["fr"]
     if elapsed > timeout:
@@ -282,6 +301,7 @@ while True:
 
     if (hist_total == 0) or (darkness == 100):
         black_tries += 1
+        send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
 
     dark_running_total += darkness
@@ -289,7 +309,10 @@ while True:
 
     if darkness > dark_threshold:
         dark_tries += 1
+        send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
+
+    send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
 
     if scaling_factor != 1:
         frame = cv2.resize(

@@ -55,6 +55,25 @@ jobs:
               raise SystemExit("OpenCV is missing required APIs: " + ", ".join(missing))
           PY
 
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v6
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 \
+            python3-numpy \
+            python3-opencv
+
+      - name: Run unit tests
+        run: python3 -m unittest discover -s tests -v
+
   build:
     name: build
     runs-on: ubuntu-24.04

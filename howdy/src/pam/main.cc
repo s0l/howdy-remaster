@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <tuple>
+#include <vector>
 
 #include <INIReader.h>
 
@@ -217,6 +218,10 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
     syslog(LOG_ERR, "Failed to get username");
     return pam_res;
   }
+  if (!is_safe_username(username)) {
+    syslog(LOG_ERR, "Unsafe username rejected");
+    return PAM_AUTH_ERR;
+  }
 
   // Check if we should continue
   pam_res = check_enabled(config, username);
@@ -264,13 +269,38 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
 
   const char *const args[] = {PYTHON_EXECUTABLE_PATH, // NOLINT
                               COMPARE_PROCESS_PATH, username, nullptr};
+  std::vector<std::string> child_env_storage = {
+      "PATH=/usr/sbin:/usr/bin:/sbin:/bin"};
+  auto copy_env = [&child_env_storage](const char *name) {
+    const char *value = std::getenv(name);
+    if (value != nullptr) {
+      child_env_storage.emplace_back(std::string(name) + "=" + value);
+    }
+  };
+  copy_env("DISPLAY");
+  copy_env("WAYLAND_DISPLAY");
+  copy_env("XAUTHORITY");
+  copy_env("XDG_RUNTIME_DIR");
+  copy_env("DBUS_SESSION_BUS_ADDRESS");
+  copy_env("LANG");
+  copy_env("LC_ALL");
+  copy_env("LC_CTYPE");
+
+  std::vector<char *> child_env;
+  child_env.reserve(child_env_storage.size() + 1);
+  for (auto &entry : child_env_storage) {
+    child_env.push_back(entry.data());
+  }
+  child_env.push_back(nullptr);
   pid_t child_pid;
 
   // Start the python subprocess
-  if (posix_spawnp(&child_pid, PYTHON_EXECUTABLE_PATH, nullptr, nullptr,
-                   const_cast<char *const *>(args), nullptr) != 0) {
-    syslog(LOG_ERR, "Can't spawn the howdy process: %s (%d)", strerror(errno),
-           errno);
+  int spawn_error = posix_spawn(&child_pid, PYTHON_EXECUTABLE_PATH, nullptr, nullptr,
+                                const_cast<char *const *>(args),
+                                child_env.data());
+  if (spawn_error != 0) {
+    syslog(LOG_ERR, "Can't spawn the howdy process: %s (%d)",
+           strerror(spawn_error), spawn_error);
     return PAM_SYSTEM_ERR;
   }
 

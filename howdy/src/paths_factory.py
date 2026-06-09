@@ -13,6 +13,23 @@ opencv_sface_models = [
 ]
 
 
+def validate_username(user: str) -> str:
+    """Return a safe username for model-file lookup."""
+    if not isinstance(user, str) or user in {"", ".", ".."}:
+        raise ValueError("Invalid username")
+
+    if any(ord(char) < 32 or ord(char) == 127 for char in user):
+        raise ValueError("Invalid username")
+
+    if "/" in user or "\\" in user:
+        raise ValueError("Invalid username")
+
+    if PurePath(user).name != user:
+        raise ValueError("Invalid username")
+
+    return user
+
+
 def dlib_data_dir_path() -> str:
     return str(paths.dlib_data_dir)
 
@@ -42,6 +59,7 @@ def face_recognition_sface_path() -> str:
 
 
 def user_model_path(user: str) -> str:
+    validate_username(user)
     return str(paths.user_models_dir / f"{user}.dat")
 
 
@@ -63,3 +81,7 @@ def user_models_dir_path() -> PurePath:
 
 def logo_path() -> str:
     return str(paths.data_dir / "logo.png")
+
+
+def gtk_bin_path() -> str:
+    return str(getattr(paths, "gtk_bin_path", PurePath("/usr/bin/howdy-gtk")))

@@ -31,6 +31,26 @@ inline auto get_workaround(const std::string &workaround) -> Workaround {
   return Workaround::Off;
 }
 
+inline auto is_safe_username(const char *username) -> bool {
+  if (username == nullptr) {
+    return false;
+  }
+
+  std::string user(username);
+  if (user.empty() || user == "." || user == "..") {
+    return false;
+  }
+
+  for (unsigned char character : user) {
+    if (character < 32 || character == 127 || character == '/' ||
+        character == '\\') {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 /**
  * Check if an environment variable exists either in the environ array or using
  * getenv.
