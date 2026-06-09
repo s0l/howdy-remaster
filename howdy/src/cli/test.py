@@ -7,11 +7,11 @@ import os
 import json
 import sys
 import time
-import dlib
 import cv2
 import numpy as np
 import paths_factory
 
+from face_backends import load_face_backend
 from i18n import _
 from recorders.video_capture import VideoCapture
 
@@ -53,29 +53,32 @@ def print_text(line_number, text):
 	cv2.putText(overlay, text, (10, height - 10 - (10 * line_number)), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 
 
-use_cnn = config.getboolean('core', 'use_cnn', fallback=False)
-
-if use_cnn:
-	face_detector = dlib.cnn_face_detection_model_v1(
-		paths_factory.mmod_human_face_detector_path()
-	)
-else:
-	face_detector = dlib.get_frontal_face_detector()
-
-pose_predictor = dlib.shape_predictor(paths_factory.shape_predictor_5_face_landmarks_path())
-face_encoder = dlib.face_recognition_model_v1(paths_factory.dlib_face_recognition_resnet_model_v1_path())
+try:
+	face_backend = load_face_backend(config)
+except (FileNotFoundError, ValueError) as err:
+	print(err)
+	sys.exit(1)
 
 encodings = []
 models = None
+compatible_models = []
 
 try:
 	user = builtins.howdy_user
 	models = json.load(open(paths_factory.user_model_path(user)))
 
 	for model in models:
-		encodings += model["data"]
+		if model.get("backend") == face_backend.name:
+			encodings += model["data"]
+			compatible_models.append(model)
 except FileNotFoundError:
 	pass
+
+if models and not encodings:
+	print(_("No models for backend {backend}, please run howdy add again").format(backend=face_backend.name))
+	models = None
+else:
+	models = compatible_models
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -166,46 +169,37 @@ try:
 
 			# Get the locations of all faces and their locations
 			# Upsample it once
-			face_locations = face_detector(frame, 1)
+			face_locations = face_backend.detect(frame, frame)
 			rec_tm = time.time() - rec_tm
 
 			# Loop though all faces and paint a circle around them
 			for loc in face_locations:
-				if use_cnn:
-					loc = loc.rect
-
 				# By default the circle around the face is red for no match
 				color = (0, 0, 230)
 
 				# Get the center X and Y from the rectangular points
-				x = int((loc.right() - loc.left()) / 2) + loc.left()
-				y = int((loc.bottom() - loc.top()) / 2) + loc.top()
+				left, top, face_width, face_height = face_backend.face_rect(loc)
+				x = int(left + face_width / 2)
+				y = int(top + face_height / 2)
 
-				# Get the raduis from the with of the square
-				r = (loc.right() - loc.left()) / 2
+				# Get the radius from the width of the square
+				r = face_width / 2
 				# Add 20% padding
 				r = int(r + (r * 0.2))
 
 				# If we have models defined for the current user
 				if models:
 					# Get the encoding of the face in the frame
-					face_landmark = pose_predictor(orig_frame, loc)
-					face_encoding = np.array(face_encoder.compute_face_descriptor(orig_frame, face_landmark, 1))
-
-					# Match this found face against a known face
-					matches = np.linalg.norm(encodings - face_encoding, axis=1)
-
-					# Get best match
-					match_index = np.argmin(matches)
-					match = matches[match_index]
+					face_encoding = face_backend.encode(orig_frame, loc)
+					match_index, match = face_backend.match(encodings, face_encoding)
 
 					# If a model matches
-					if 0 < match < video_certainty:
+					if face_backend.is_match(match):
 						# Turn the circle green
 						color = (0, 230, 0)
 
 						# Print the name of the model next to the circle
-						circle_text = "{} (certainty: {})".format(models[match_index]["label"], round(match * 10, 3))
+						circle_text = "{} (score: {})".format(models[match_index]["label"], round(match, 3))
 						cv2.putText(overlay, circle_text, (int(x + r / 3), y - r), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 255, 0), 0, cv2.LINE_AA)
 					# If no approved matches, show red text
 					else:

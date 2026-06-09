@@ -3,13 +3,9 @@
 # Executed after primary apt install
 
 # Import required modules
-import fileinput
 import subprocess
 import sys
 import os
-import re
-import tarfile
-from shutil import rmtree, which
 
 # Don't run unless we need to configure the install
 # Will also happen on upgrade but we will catch that later on
@@ -106,84 +102,15 @@ if "upgrade" in sys.argv:
 
 	sys.exit(0)
 
-log("Downloading dlib")
-
-dlib_archive = "/tmp/v19.16.tar.gz"
-loader = which("wget")
-LOADER_CMD = None
-
-# If wget is installed, use that as the downloader
-if loader:
-	LOADER_CMD = [loader, "--tries", "5", "--output-document"]
-# Otherwise, fall back on curl
-else:
-	loader = which("curl")
-	LOADER_CMD = [loader, "--retry", "5", "--location", "--output"]
-
-# Assemble and execute the download command
-cmd = LOADER_CMD + [dlib_archive, "https://github.com/davisking/dlib/archive/v19.16.tar.gz"]
-handleStatus(sc(cmd))
-
-# The folder containing the dlib source
-DLIB_DIR = None
-# A regex of all files to ignore while unpacking the archive
-excludes = re.compile(
-	r"davisking-dlib-\w+/(dlib/(http_client|java|matlab|test/)|"
-	r"(docs|examples|python_examples)|"
-	r"tools/(archive|convert_dlib_nets_to_caffe|htmlify|imglab|python/test|visual_studio_natvis))"
-)
-
-# Open the archive
-with tarfile.open(dlib_archive) as tf:
-	for item in tf:
-		# Set the destination dir if unset
-		if not DLIB_DIR:
-			DLIB_DIR = "/tmp/" + item.name
-
-		# extract only files sufficient for building
-		if not excludes.match(item.name):
-			tf.extract(item, "/tmp")
-
-# Delete the downloaded archive
-os.unlink(dlib_archive)
-
-log("Building dlib")
-
-cmd = ["sudo", "python3", "setup.py", "install"]
-cuda_used = False
-
-# Compile and link dlib
-try:
-	sp = subprocess.Popen(cmd, cwd=DLIB_DIR, stdout=subprocess.PIPE)
-except subprocess.CalledProcessError:
-	print("Error while building dlib")
-	raise
-
-# Go through each line from stdout to check for CUDA usage
-while sp.poll() is None:
-	line = sp.stdout.readline().decode("utf-8")
-
-	if "DLIB WILL USE CUDA" in line:
-		cuda_used = True
-
-	print(line, end="")
-
-log("Cleaning up dlib")
-
-# Remove the no longer needed git clone
-del sp
-rmtree(DLIB_DIR)
-
-print("Temporary dlib files removed")
-
 log("Configuring howdy")
 
-# Make sure to use CNN if dlib was compiled with CUDA support
-for line in fileinput.input(["/etc/howdy/config.ini"], inplace=1):
-	line = line.replace("use_cnn = false", "use_cnn = " + str(cuda_used).lower())
-	print(line, end="")
+if os.path.exists("/usr/local/bin/howdy"):
+	with open("/usr/local/bin/howdy") as wrapper:
+		if "/usr/local/lib/" in wrapper.read():
+			os.unlink("/usr/local/bin/howdy")
 
-print("CNN saved to config, CUDA " + ("enabled" if cuda_used else "disabled"))
+print("Howdy uses the OpenCV SFace backend by default.")
+print("If face model files are missing, run the installed face-models/install.sh script.")
 
 # Secure the howdy folder
 handleStatus(sc(["chmod 755 -R /lib/security/howdy/"], shell=True))

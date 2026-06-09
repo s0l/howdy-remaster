@@ -29,6 +29,8 @@ py_sources = [
     'cli/test.py',
     'cli.py',
     'compare.py',
+    'face_backends/__init__.py',
+    'face_backends/opencv_sface.py',
     'i18n.py',
     'paths_factory.py',
     'recorders/__init__.py',
@@ -107,6 +109,14 @@ if not fs.exists(config_path)
 endif
 
 install_data('dlib-data/install.sh', 'dlib-data/Readme.md', install_dir: dlibdatadir, install_mode: 'rwxr--r--')
+install_data(
+    'face-models/install.sh',
+    'face-models/Readme.md',
+    'face-models/face_detection_yunet_2023mar.onnx',
+    'face-models/face_recognition_sface_2021dec.onnx',
+    install_dir: facedatadir,
+    install_mode: 'rwxr--r--',
+)
 
 install_man('../howdy.1')
 
