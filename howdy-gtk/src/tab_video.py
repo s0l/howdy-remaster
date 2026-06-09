@@ -1,4 +1,6 @@
 import configparser
+import sys
+from pathlib import Path
 
 from i18n import _
 import paths_factory
@@ -12,6 +14,24 @@ MAX_HEIGHT = 300
 MAX_WIDTH = 300
 
 
+def _load_device_resolver():
+    current_dir = Path(__file__).resolve().parent
+    for candidate in [
+        current_dir.parent.parent / "howdy",
+        current_dir.parent / "howdy",
+        current_dir.parent.parent / "howdy" / "src",
+    ]:
+        if candidate.exists():
+            sys.path.insert(0, str(candidate))
+
+    try:
+        from recorders.video_capture import resolve_device_path
+    except ImportError:
+        return None
+
+    return resolve_device_path
+
+
 def on_page_switch(self, notebook, page, page_num):
     if page_num == 1:
         try:
@@ -21,7 +41,11 @@ def on_page_switch(self, notebook, page, page_num):
             print(_("Can't open camera"))
             return
 
-        path = self.config.get("video", "device_path", fallback="none")
+        resolve_device_path = _load_device_resolver()
+        if resolve_device_path is None:
+            path = self.config.get("video", "device_path", fallback="none")
+        else:
+            path = resolve_device_path(self.config, warn=False)
 
         try:
             import cv2
