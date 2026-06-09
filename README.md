@@ -169,6 +169,22 @@ Runtime logs are written to:
 /var/log/howdy/compare.log
 ```
 
+## KDE/SDDM Login
+
+SDDM starts PAM authentication only after a login request is submitted. On the
+KDE login screen, select the user, leave the password field empty, and press
+Enter or the login button to let Howdy authenticate the face.
+
+The transient `howdy-gtk` auth window is best-effort feedback for desktop PAM
+prompts such as `sudo`. On the SDDM greeter and Plasma lock screen it may not be
+shown because those processes run in a restricted display-manager environment.
+Password authentication should remain available as the fallback path.
+
+If the display manager shows PAM informational messages, enabling
+`detection_notice` in `/etc/howdy/config.ini` may display a short facial
+authentication notice. Some SDDM themes ignore those messages and only show
+generic login success or failure states.
+
 ## CLI
 
 ```text
