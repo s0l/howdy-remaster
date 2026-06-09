@@ -6,6 +6,7 @@ confdir = get_option('config_dir') != '' ? get_option('config_dir') : join_paths
 usermodelsdir = get_option('user_models_dir') != '' ? get_option('user_models_dir') : join_paths(confdir, 'models')
 logpath = get_option('log_path')
 pythonpath = get_option('python_path')
+gtkbinpath = get_option('prefix') / get_option('bindir') / 'howdy-gtk'
 
 config_path = join_paths(confdir, 'config.ini')
 
@@ -15,7 +16,8 @@ paths_dict = {
     'face_data_dir': facedatadir,
     'user_models_dir': usermodelsdir,
     'log_path': logpath,
-    'python_path': pythonpath
+    'python_path': pythonpath,
+    'gtk_bin_path': gtkbinpath
 }
 
 # We need to keep this order beause howdy-gtk defines the gtk script path which is used later in howdy

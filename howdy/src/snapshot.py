@@ -48,15 +48,16 @@ def generate(frames, text_lines):
 
 		line_number += 1
 
-	# Made sure a snapshot folder exist
-	if not os.path.exists(paths_factory.snapshots_dir_path()):
-		os.makedirs(paths_factory.snapshots_dir_path())
+	# Make sure snapshots stay private because they can contain face images.
+	os.makedirs(paths_factory.snapshots_dir_path(), mode=0o700, exist_ok=True)
+	os.chmod(paths_factory.snapshots_dir_path(), 0o700)
 
 	# Generate a filename based on the current time
 	filename = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.jpg")
 	filepath = paths_factory.snapshot_path(filename)
 	# Write the image to that file
 	cv2.imwrite(filepath, snap)
+	os.chmod(filepath, 0o600)
 
 	# Return the saved file location
 	return filepath

@@ -17,3 +17,6 @@ log_path = PurePath("@log_path@")
 
 # Define the absolute path to the Howdy data directory
 data_dir = PurePath("@data_dir@")
+
+# Define the absolute path to the howdy-gtk launcher
+gtk_bin_path = PurePath("@gtk_bin_path@")

@@ -24,9 +24,14 @@ from recorders.video_capture import VideoCapture
 def setup_logger():
     log_dir = "/var/log/howdy"
     try:
-        os.makedirs(log_dir, exist_ok=True)
+        os.makedirs(log_dir, mode=0o700, exist_ok=True)
+        os.chmod(log_dir, 0o700)
+        log_file = os.path.join(log_dir, "compare.log")
+        fd = os.open(log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        os.close(fd)
+        os.chmod(log_file, 0o600)
         logging.basicConfig(
-            filename=os.path.join(log_dir, "compare.log"),
+            filename=log_file,
             level=logging.DEBUG,
             format="%(asctime)s - %(levelname)s - %(message)s",
         )
@@ -160,7 +165,7 @@ timings["ll"] = time.time() - timings["ll"]
 try:
     with open(paths_factory.user_model_path(user)) as f:
         models = json.load(f)
-except FileNotFoundError:
+except (FileNotFoundError, ValueError):
     exit(10)
 
 if len(models) < 1:
@@ -187,7 +192,7 @@ gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
 
 try:
     gtk_proc = subprocess.Popen(
-        ["howdy-gtk", "--start-auth-ui"],
+        [paths_factory.gtk_bin_path(), "--start-auth-ui"],
         stdin=subprocess.PIPE,
         stdout=gtk_pipe,
         stderr=gtk_pipe,

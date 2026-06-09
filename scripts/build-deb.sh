@@ -34,6 +34,8 @@ mkdir -p \
 	"$root_dir/var/log/howdy/snapshots"
 
 install -m 0644 howdy/src/config.ini "$root_dir/etc/howdy/config.ini"
+chmod 755 "$root_dir/var" "$root_dir/var/cache" "$root_dir/var/log" "$root_dir/etc/howdy"
+chmod 700 "$root_dir/etc/howdy/models" "$root_dir/var/cache/howdy" "$root_dir/var/log/howdy" "$root_dir/var/log/howdy/snapshots"
 
 cat > "$root_dir/DEBIAN/control" <<EOF
 Package: howdy
@@ -63,11 +65,14 @@ if [ -f /usr/local/bin/howdy ] && grep -q "/usr/local/lib/.*/howdy/cli.py" /usr/
 	rm -f /usr/local/bin/howdy
 fi
 
-chown -R root:root /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /var/cache/howdy /var/log/howdy
+find /lib/security/howdy /lib/security/howdy-gtk -xdev -exec chown -h root:root {} +
+chown root:root /etc/howdy /etc/howdy/models /etc/howdy/face-models /var/cache/howdy /var/log/howdy /var/log/howdy/snapshots
 chown root:root /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
 
-chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models /var/log/howdy /var/log/howdy/snapshots
+chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models
 chmod 700 /etc/howdy/models /var/cache/howdy
+chmod 700 /var/log/howdy /var/log/howdy/snapshots
+chmod 644 /etc/howdy/config.ini
 chmod 755 /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
 
 if command -v pam-auth-update >/dev/null 2>&1; then

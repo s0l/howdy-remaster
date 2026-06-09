@@ -1,5 +1,6 @@
 import configparser
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -135,6 +136,8 @@ class VideoCaptureHelpersTest(unittest.TestCase):
                 video_capture._write_cached_device_path("/dev/video2")
 
                 self.assertEqual(video_capture._read_cached_device_path(), "/dev/video2")
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(cache_path)).st_mode), 0o700)
+                self.assertEqual(stat.S_IMODE(os.stat(cache_path).st_mode), 0o600)
 
 
 if __name__ == "__main__":

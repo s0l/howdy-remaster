@@ -7,6 +7,7 @@ import cv2
 import glob
 import os
 import sys
+import tempfile
 
 from i18n import _
 
@@ -72,12 +73,23 @@ def _read_cached_device_path():
 
 
 def _write_cached_device_path(path):
-	try:
-		os.makedirs(os.path.dirname(DEVICE_CACHE_PATH), exist_ok=True)
-		with open(DEVICE_CACHE_PATH, "w") as cache_file:
-			cache_file.write(path + "\n")
-	except OSError:
-		pass
+    cache_dir = os.path.dirname(DEVICE_CACHE_PATH)
+    try:
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        os.chmod(cache_dir, 0o700)
+        fd, tmp_path = tempfile.mkstemp(prefix=".device_path.", dir=cache_dir, text=True)
+        os.chmod(tmp_path, 0o600)
+        with os.fdopen(fd, "w") as cache_file:
+            cache_file.write(path + "\n")
+        os.replace(tmp_path, DEVICE_CACHE_PATH)
+        os.chmod(DEVICE_CACHE_PATH, 0o600)
+    except OSError:
+        try:
+            if "tmp_path" in locals():
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        pass
 
 
 def _is_gray_frame(frame):
