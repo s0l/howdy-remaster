@@ -11,6 +11,7 @@ import sys
 from i18n import _
 
 AUTO_DEVICE_PATHS = {"", "none", "auto"}
+DEVICE_CACHE_PATH = "/var/cache/howdy/device_path"
 
 
 def _video_device_name(path):
@@ -33,6 +34,50 @@ def opencv_capture_source(path):
 		return int(device[5:])
 
 	return path
+
+
+def _open_opencv_capture(path, quiet=False):
+	previous_log_level = None
+
+	if quiet and hasattr(cv2, "getLogLevel") and hasattr(cv2, "setLogLevel"):
+		previous_log_level = cv2.getLogLevel()
+		cv2.setLogLevel(0)
+
+	try:
+		return cv2.VideoCapture(opencv_capture_source(path), cv2.CAP_V4L)
+	finally:
+		if previous_log_level is not None:
+			cv2.setLogLevel(previous_log_level)
+
+
+def _camera_can_open(path):
+	if not os.path.exists(path):
+		return False
+
+	capture = _open_opencv_capture(path, quiet=True)
+	opened = capture.isOpened()
+	capture.release()
+
+	return opened
+
+
+def _read_cached_device_path():
+	try:
+		with open(DEVICE_CACHE_PATH) as cache_file:
+			path = cache_file.read().strip()
+	except OSError:
+		return None
+
+	return path or None
+
+
+def _write_cached_device_path(path):
+	try:
+		os.makedirs(os.path.dirname(DEVICE_CACHE_PATH), exist_ok=True)
+		with open(DEVICE_CACHE_PATH, "w") as cache_file:
+			cache_file.write(path + "\n")
+	except OSError:
+		pass
 
 
 def _is_gray_frame(frame):
@@ -61,7 +106,7 @@ def _score_device(path, probe=True):
 	if not probe:
 		return score, name
 
-	capture = cv2.VideoCapture(opencv_capture_source(path), cv2.CAP_V4L)
+	capture = _open_opencv_capture(path, quiet=True)
 	if not capture.isOpened():
 		capture.release()
 		return score - 1000, name
@@ -119,6 +164,10 @@ def resolve_device_path(config, warn=True):
 	if configured_path.lower() not in AUTO_DEVICE_PATHS and os.path.exists(configured_path):
 		return configured_path
 
+	cached_path = _read_cached_device_path()
+	if configured_path.lower() in AUTO_DEVICE_PATHS and cached_path and _camera_can_open(cached_path):
+		return cached_path
+
 	candidates = [
 		candidate for candidate in discover_camera_devices(probe=True)
 		if candidate["score"] > -100
@@ -131,12 +180,11 @@ def resolve_device_path(config, warn=True):
 
 	if candidates:
 		selected = candidates[0]
+		_write_cached_device_path(selected["path"])
 		if warn:
 			if configured_path.lower() not in AUTO_DEVICE_PATHS:
 				print(_("Configured camera path was not found, falling back to auto-detected camera:"))
-			else:
-				print(_("Auto-detected camera device:"))
-			print("\t{} ({})".format(selected["path"], selected["name"] or selected["real_path"]))
+				print("\t{} ({})".format(selected["path"], selected["name"] or selected["real_path"]))
 			if not probed:
 				print(_("Warning: Howdy could not probe camera devices before selecting one."))
 		return selected["path"]
@@ -261,10 +309,7 @@ class VideoCapture:
 
 		else:
 			# Start video capture on the IR camera through OpenCV
-			self.internal = cv2.VideoCapture(
-				opencv_capture_source(self.device_path),
-				cv2.CAP_V4L
-			)
+			self.internal = _open_opencv_capture(self.device_path)
 			# Set the capture frame rate
 			# Without this the first detected (and possibly lower) frame rate is used, -1 seems to select the highest
 			# Use 0 as a fallback to avoid breaking an existing setup, new installs should default to -1
