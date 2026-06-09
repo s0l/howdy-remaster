@@ -22,6 +22,12 @@ windowWidth = 400
 windowHeight = 100
 
 
+def gtk_display_available():
+	"""Return whether GTK can create windows in the current environment."""
+	initialized, _argv = gtk.init_check(sys.argv)
+	return initialized
+
+
 class StickyWindow(gtk.Window):
 	# Set default messages to show in the popup
 	message = _("Loading...  ")
@@ -153,6 +159,11 @@ class StickyWindow(gtk.Window):
 
 # Make sure we quit on a SIGINT
 signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+# The auth popup is optional. PAM can invoke it from environments without a
+# usable GUI session; exiting cleanly avoids Apport crash reports.
+if not gtk_display_available():
+	sys.exit(0)
 
 # Open the GTK window
 window = StickyWindow()
