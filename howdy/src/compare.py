@@ -6,9 +6,12 @@ import configparser
 import json
 import logging
 import os
+import queue
+import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -45,6 +48,7 @@ def setup_logger():
 logger = setup_logger()
 timings = {"st": time.time()}
 DEFAULT_TIMEOUT = 10
+video_capture_released = False
 
 
 def exit(code: int | None = None) -> None:
@@ -63,6 +67,21 @@ def exit(code: int | None = None) -> None:
 
     if code is not None:
         sys.exit(code)
+
+
+def release_video_capture() -> None:
+    """Release the camera as soon as auth no longer needs more frames."""
+    global video_capture_released
+
+    if video_capture_released or "video_capture" not in globals():
+        return
+
+    video_capture_released = True
+    try:
+        video_capture.release()
+        logger.info("Released video capture device")
+    except Exception as err:
+        logger.warning("Failed to release video capture device: %s", err)
 
 
 def make_snapshot(type: str) -> None:
@@ -99,6 +118,32 @@ def send_to_ui(type: str, message: str) -> None:
             gtk_proc.stdin.flush()
     except IOError:
         pass
+
+
+def read_frame_before(deadline: float):
+    """Read one camera frame without letting a blocking driver hang PAM auth."""
+    result_queue = queue.Queue(maxsize=1)
+
+    def read_frame():
+        try:
+            result_queue.put(("ok", video_capture.read_frame()))
+        except BaseException as err:
+            result_queue.put(("error", err))
+
+    thread = threading.Thread(target=read_frame, daemon=True)
+    thread.start()
+
+    remaining = max(0.0, deadline - time.time())
+    try:
+        status, payload = result_queue.get(timeout=remaining)
+    except queue.Empty:
+        logger.error("Timed out waiting for camera frame")
+        exit(11)
+
+    if status == "error":
+        raise payload
+
+    return payload
 
 
 def compatible_encodings(raw_models, backend):
@@ -206,14 +251,16 @@ save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
+confirmation_required = os.environ.get("HOWDY_CONFIRM_AUTH") == "1"
 
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
+gtk_stdout_pipe = subprocess.PIPE if confirmation_required else gtk_pipe
 
 try:
     gtk_proc = subprocess.Popen(
         [paths_factory.gtk_bin_path(), "--start-auth-ui"],
         stdin=subprocess.PIPE,
-        stdout=gtk_pipe,
+        stdout=gtk_stdout_pipe,
         stderr=gtk_pipe,
         start_new_session=True,
     )
@@ -222,6 +269,43 @@ except FileNotFoundError:
     pass
 
 send_to_ui("M", _("Starting up..."))
+
+
+def request_ui_confirmation() -> bool:
+    if not confirmation_required:
+        return True
+
+    if gtk_proc is None or gtk_proc.stdout is None or gtk_proc.poll() is not None:
+        logger.error("Confirmation requested but auth UI is unavailable")
+        return False
+
+    send_to_ui("C", "1")
+    send_to_ui("M", _("Face recognized"))
+    send_to_ui("S", _("Approve this authentication request?"))
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        ready, _writable, _errors = select.select([gtk_proc.stdout], [], [], 0.2)
+        if not ready:
+            if gtk_proc.poll() is not None:
+                logger.info("Auth UI exited before confirmation")
+                return False
+            continue
+
+        response = gtk_proc.stdout.readline()
+        if not response:
+            return False
+
+        response_text = response.decode("utf-8", errors="replace").strip()
+        if response_text == "ALLOW":
+            logger.info("Authentication approved by auth UI")
+            return True
+        if response_text == "DENY":
+            logger.info("Authentication denied by auth UI")
+            return False
+
+    logger.info("Timed out waiting for auth UI confirmation")
+    return False
 
 timings["in"] = time.time() - timings["st"]
 logger.info("Face backend %s initialized", face_backend.name)
@@ -250,13 +334,14 @@ send_to_ui("M", _("Identifying you..."))
 
 valid_frames = 0
 timings["fr"] = time.time()
+deadline = timings["fr"] + timeout
 dark_running_total = 0
 
 while True:
     frames += 1
 
     elapsed = time.time() - timings["fr"]
-    if elapsed > timeout:
+    if time.time() > deadline:
         if save_failed:
             make_snapshot(_("FAILED"))
 
@@ -280,7 +365,7 @@ while True:
 
         exit(11)
 
-    frame, gsframe = video_capture.read_frame()
+    frame, gsframe = read_frame_before(deadline)
     gsframe = clahe.apply(gsframe)
 
     if save_failed or save_successful:
@@ -348,6 +433,9 @@ while True:
     face_locations = face_backend.detect(frame, gsframe)
     logger.debug("Frame %d: detected %d face(s)", frames, len(face_locations))
 
+    if not face_locations:
+        send_to_ui("M", _("Look at the camera"))
+
     for face_location in face_locations:
         face_encoding = face_backend.encode(frame, face_location)
         match_index, match = face_backend.match(encodings, face_encoding)
@@ -385,6 +473,11 @@ while True:
             if config.getboolean("rubberstamps", "enabled", fallback=False):
                 print(_("Rubberstamps are not supported by the opencv_sface backend yet"))
                 logger.error("Rubberstamps requested with unsupported backend")
+                exit(15)
+
+            release_video_capture()
+
+            if not request_ui_confirmation():
                 exit(15)
 
             exit(0)
