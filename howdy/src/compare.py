@@ -6,10 +6,12 @@ import configparser
 import json
 import logging
 import os
+import queue
 import select
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -100,6 +102,32 @@ def send_to_ui(type: str, message: str) -> None:
             gtk_proc.stdin.flush()
     except IOError:
         pass
+
+
+def read_frame_before(deadline: float):
+    """Read one camera frame without letting a blocking driver hang PAM auth."""
+    result_queue = queue.Queue(maxsize=1)
+
+    def read_frame():
+        try:
+            result_queue.put(("ok", video_capture.read_frame()))
+        except BaseException as err:
+            result_queue.put(("error", err))
+
+    thread = threading.Thread(target=read_frame, daemon=True)
+    thread.start()
+
+    remaining = max(0.0, deadline - time.time())
+    try:
+        status, payload = result_queue.get(timeout=remaining)
+    except queue.Empty:
+        logger.error("Timed out waiting for camera frame")
+        exit(11)
+
+    if status == "error":
+        raise payload
+
+    return payload
 
 
 def compatible_encodings(raw_models, backend):
@@ -290,13 +318,14 @@ send_to_ui("M", _("Identifying you..."))
 
 valid_frames = 0
 timings["fr"] = time.time()
+deadline = timings["fr"] + timeout
 dark_running_total = 0
 
 while True:
     frames += 1
 
     elapsed = time.time() - timings["fr"]
-    if elapsed > timeout:
+    if time.time() > deadline:
         if save_failed:
             make_snapshot(_("FAILED"))
 
@@ -320,7 +349,7 @@ while True:
 
         exit(11)
 
-    frame, gsframe = video_capture.read_frame()
+    frame, gsframe = read_frame_before(deadline)
     gsframe = clahe.apply(gsframe)
 
     if save_failed or save_successful:
