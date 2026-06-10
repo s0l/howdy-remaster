@@ -93,6 +93,7 @@ For the polkit path, trigger a real graphical privilege prompt and verify that:
 - closing the UI does not approve the polkit request;
 - timeout does not approve the polkit request;
 - blocked camera reads do not hang PAM indefinitely;
+- the camera is released before waiting for interactive confirmation;
 - `Allow` approves only after a successful face match;
 - `Enter` and `Space` activate `Allow` when the confirmation window has focus;
 - `Enter` and `Space` activate `Deny` if keyboard focus was moved to `Deny`;

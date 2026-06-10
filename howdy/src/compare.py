@@ -48,6 +48,7 @@ def setup_logger():
 logger = setup_logger()
 timings = {"st": time.time()}
 DEFAULT_TIMEOUT = 10
+video_capture_released = False
 
 
 def exit(code: int | None = None) -> None:
@@ -66,6 +67,21 @@ def exit(code: int | None = None) -> None:
 
     if code is not None:
         sys.exit(code)
+
+
+def release_video_capture() -> None:
+    """Release the camera as soon as auth no longer needs more frames."""
+    global video_capture_released
+
+    if video_capture_released or "video_capture" not in globals():
+        return
+
+    video_capture_released = True
+    try:
+        video_capture.release()
+        logger.info("Released video capture device")
+    except Exception as err:
+        logger.warning("Failed to release video capture device: %s", err)
 
 
 def make_snapshot(type: str) -> None:
@@ -458,6 +474,8 @@ while True:
                 print(_("Rubberstamps are not supported by the opencv_sface backend yet"))
                 logger.error("Rubberstamps requested with unsupported backend")
                 exit(15)
+
+            release_video_capture()
 
             if not request_ui_confirmation():
                 exit(15)
