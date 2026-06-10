@@ -26,13 +26,19 @@ class AuthWindow(gtk.Window):
 		self.message_label = gtk.Label(label=_("Loading..."))
 		self.subtext_label = gtk.Label(label="")
 		self.button_box = gtk.Box(orientation=gtk.Orientation.HORIZONTAL, spacing=8)
+		self.allow_button = None
+		self.deny_button = None
 
 		self.set_resizable(False)
 		self.set_keep_above(True)
+		self.set_modal(True)
+		self.set_accept_focus(True)
+		self.set_focus_on_map(True)
 		self.set_position(gtk.WindowPosition.CENTER)
 		self.set_type_hint(gdk.WindowTypeHint.DIALOG)
 		self.connect("destroy", self.exit)
 		self.connect("delete_event", self.exit)
+		self.connect("key-press-event", self.on_key_press)
 
 		self.build_content()
 		self.show_all()
@@ -61,14 +67,15 @@ class AuthWindow(gtk.Window):
 		self.subtext_label.set_line_wrap(True)
 		text_box.pack_start(self.subtext_label, False, False, 0)
 
-		deny_button = gtk.Button(label=_("Deny"))
-		deny_button.connect("clicked", self.deny)
-		self.button_box.pack_start(deny_button, True, True, 0)
+		self.deny_button = gtk.Button(label=_("Deny"))
+		self.deny_button.connect("clicked", self.deny)
+		self.button_box.pack_start(self.deny_button, True, True, 0)
 
-		allow_button = gtk.Button(label=_("Allow"))
-		allow_button.get_style_context().add_class("suggested-action")
-		allow_button.connect("clicked", self.allow)
-		self.button_box.pack_start(allow_button, True, True, 0)
+		self.allow_button = gtk.Button(label=_("Allow"))
+		self.allow_button.set_can_default(True)
+		self.allow_button.get_style_context().add_class("suggested-action")
+		self.allow_button.connect("clicked", self.allow)
+		self.button_box.pack_start(self.allow_button, True, True, 0)
 		text_box.pack_start(self.button_box, False, False, 0)
 
 	def build_logo(self):
@@ -91,6 +98,18 @@ class AuthWindow(gtk.Window):
 	def set_confirmation(self, enabled):
 		self.confirmation = enabled
 		self.button_box.set_visible(enabled)
+		if enabled:
+			self.present()
+			self.set_default(self.allow_button)
+			self.allow_button.grab_focus()
+			gobject.idle_add(self.focus_confirmation)
+
+	def focus_confirmation(self):
+		self.present_with_time(gdk.CURRENT_TIME)
+		if self.get_window() is not None:
+			self.get_window().focus(gdk.CURRENT_TIME)
+		self.allow_button.grab_focus()
+		return False
 
 	def catch_stdin(self):
 		while True:
@@ -119,11 +138,25 @@ class AuthWindow(gtk.Window):
 		elif command == "C":
 			self.set_confirmation(value == "1")
 
-	def allow(self, _widget):
+	def on_key_press(self, _widget, event):
+		if not self.confirmation:
+			return False
+
+		if event.keyval in (gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter, gdk.KEY_space):
+			self.allow()
+			return True
+
+		if event.keyval == gdk.KEY_Escape:
+			self.deny()
+			return True
+
+		return False
+
+	def allow(self, _widget=None):
 		print("ALLOW", flush=True)
 		self.exit()
 
-	def deny(self, _widget):
+	def deny(self, _widget=None):
 		print("DENY", flush=True)
 		self.exit()
 
