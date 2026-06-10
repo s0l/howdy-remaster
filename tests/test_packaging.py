@@ -36,10 +36,10 @@ class DebianPackagingSecurityTest(unittest.TestCase):
         self.assertIn('setfacl -m "u:$uid:--x" /etc/howdy/models || true', self.script)
         self.assertIn('setfacl -m "u:$uid:r--" "$model_file" || true', self.script)
 
-    def test_polkit_requires_explicit_confirmation_by_default(self):
+    def test_privilege_services_require_explicit_confirmation_by_default(self):
         self.assertRegex(
             self.config,
-            re.compile(r"^confirmation_services\s*=\s*polkit-1\s*$", re.MULTILINE),
+            re.compile(r"^confirmation_services\s*=\s*polkit-1,sudo,sudo-i\s*$", re.MULTILINE),
         )
 
 

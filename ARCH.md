@@ -11,13 +11,13 @@ program can trigger a polkit request while the user's face is already in front o
 the laptop camera. If face recognition alone is enough to satisfy the PAM stack,
 the privilege escalation can be approved without an intentional user action.
 
-The default config therefore lists `polkit-1` in `confirmation_services`. The PAM
-module passes `HOWDY_CONFIRM_AUTH=1` to the compare process for those services.
-After a successful face match, `compare.py` asks the GTK auth UI for an explicit
-`ALLOW` response. `DENY`, a closed UI, an unavailable display, unreadable stdout,
-or a timeout must be treated as authentication failure. This failure should let
-the surrounding PAM/polkit stack fall back to its normal password path rather
-than silently granting access.
+The default config therefore lists `polkit-1`, `sudo`, and `sudo-i` in
+`confirmation_services`. The PAM module passes `HOWDY_CONFIRM_AUTH=1` to the
+compare process for those services. After a successful face match, `compare.py`
+asks the GTK auth UI for an explicit `ALLOW` response. `DENY`, a closed UI, an
+unavailable display, unreadable stdout, or a timeout must be treated as
+authentication failure. This failure should let the surrounding PAM stack fall
+back to its normal password path rather than silently granting access.
 
 Keep this flow narrow:
 
