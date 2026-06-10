@@ -94,6 +94,7 @@ For the polkit path, trigger a real graphical privilege prompt and verify that:
 - timeout does not approve the polkit request;
 - `Allow` approves only after a successful face match;
 - `Enter` and `Space` activate `Allow` when the confirmation window has focus;
+- `Enter` and `Space` activate `Deny` if keyboard focus was moved to `Deny`;
 - `Esc` activates `Deny`;
 - KWin/desktop logs do not get new spam bursts specifically correlated with the
   Howdy confirmation window.

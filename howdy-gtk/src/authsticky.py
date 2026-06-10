@@ -143,7 +143,11 @@ class AuthWindow(gtk.Window):
 			return False
 
 		if event.keyval in (gdk.KEY_Return, gdk.KEY_KP_Enter, gdk.KEY_ISO_Enter, gdk.KEY_space):
-			self.allow()
+			focus = self.get_focus()
+			if focus == self.deny_button:
+				self.deny()
+			else:
+				self.allow()
 			return True
 
 		if event.keyval == gdk.KEY_Escape:
