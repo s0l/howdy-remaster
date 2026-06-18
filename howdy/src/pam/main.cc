@@ -338,10 +338,32 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
   child_env.push_back(nullptr);
   pid_t child_pid;
 
-  // Start the python subprocess
-  int spawn_error = posix_spawn(&child_pid, PYTHON_EXECUTABLE_PATH, nullptr, nullptr,
-                                const_cast<char *const *>(args),
-                                child_env.data());
+  posix_spawnattr_t spawn_attr;
+  int spawn_error = posix_spawnattr_init(&spawn_attr);
+  if (spawn_error != 0) {
+    syslog(LOG_ERR, "Can't initialize howdy process attributes: %s (%d)",
+           strerror(spawn_error), spawn_error);
+    return PAM_SYSTEM_ERR;
+  }
+
+  spawn_error = posix_spawnattr_setflags(&spawn_attr, POSIX_SPAWN_SETPGROUP);
+  if (spawn_error == 0) {
+    spawn_error = posix_spawnattr_setpgroup(&spawn_attr, 0);
+  }
+
+  if (spawn_error != 0) {
+    syslog(LOG_ERR, "Can't configure howdy process group: %s (%d)",
+           strerror(spawn_error), spawn_error);
+    posix_spawnattr_destroy(&spawn_attr);
+    return PAM_SYSTEM_ERR;
+  }
+
+  // Start the python subprocess in its own process group so all helpers can be
+  // terminated together when PAM no longer needs face authentication.
+  spawn_error = posix_spawn(&child_pid, PYTHON_EXECUTABLE_PATH, nullptr,
+                            &spawn_attr, const_cast<char *const *>(args),
+                            child_env.data());
+  posix_spawnattr_destroy(&spawn_attr);
   if (spawn_error != 0) {
     syslog(LOG_ERR, "Can't spawn the howdy process: %s (%d)",
            strerror(spawn_error), spawn_error);
@@ -404,8 +426,13 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
 
   // The password has been entered or an error has occurred
   if (confirmation_type == ConfirmationType::Pam) {
-    // We kill the child because we don't need its result
-    kill(child_pid, SIGTERM);
+    // We kill the compare process group because we don't need its result or any
+    // camera helper it may have spawned.
+    if (kill(-child_pid, SIGTERM) != 0) {
+      syslog(LOG_WARNING, "Failed to terminate howdy process group: %s (%d)",
+             strerror(errno), errno);
+      kill(child_pid, SIGTERM);
+    }
     child_task.stop(false);
 
     // We just wait for the thread to stop since it's this one which sent us the

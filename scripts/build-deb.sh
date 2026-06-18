@@ -70,6 +70,8 @@ chown root:root /etc/howdy /etc/howdy/models /etc/howdy/face-models /var/cache/h
 chown root:root /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
 
 chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models
+find /lib/security/howdy /lib/security/howdy-gtk -xdev -type d -exec chmod 755 {} +
+find /lib/security/howdy /lib/security/howdy-gtk -xdev -type f -exec chmod 644 {} +
 chmod 700 /etc/howdy/models /var/cache/howdy
 chmod 700 /var/log/howdy /var/log/howdy/snapshots
 chmod 644 /etc/howdy/config.ini

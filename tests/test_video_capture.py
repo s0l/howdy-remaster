@@ -103,11 +103,54 @@ class VideoCaptureHelpersTest(unittest.TestCase):
         config = config_with_device("/dev/video9")
 
         with mock.patch.object(video_capture.os.path, "exists", return_value=True):
-            with mock.patch.object(video_capture, "discover_camera_devices") as discover:
-                path = video_capture.resolve_device_path(config, warn=False)
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "discover_camera_devices") as discover:
+                    path = video_capture.resolve_device_path(config, warn=False)
 
         self.assertEqual(path, "/dev/video9")
         discover.assert_not_called()
+
+    def test_resolve_device_path_rejects_unsafe_configured_path_by_default(self):
+        config = config_with_device("/tmp/not-a-camera")
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=False):
+                with self.assertRaises(SystemExit) as err:
+                    video_capture.resolve_device_path(config, warn=False)
+
+        self.assertEqual(err.exception.code, 14)
+
+    def test_resolve_device_path_allows_unsafe_configured_path_when_enabled(self):
+        config = config_with_device("/tmp/custom-camera")
+        config["video"]["allow_unsafe_device_path"] = "true"
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path") as safe_check:
+                path = video_capture.resolve_device_path(config, warn=False)
+
+        self.assertEqual(path, "/tmp/custom-camera")
+        safe_check.assert_not_called()
+
+    def test_safe_video_device_path_requires_character_video_device(self):
+        fake_stat = os.stat_result((stat.S_IFCHR | 0o600, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        with mock.patch.object(video_capture.os, "stat", return_value=fake_stat):
+            with mock.patch.object(video_capture.os.path, "realpath", return_value="/dev/video2"):
+                self.assertTrue(video_capture._is_safe_video_device_path("/dev/v4l/by-path/ir"))
+
+    def test_safe_video_device_path_rejects_non_video_character_device(self):
+        fake_stat = os.stat_result((stat.S_IFCHR | 0o600, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        with mock.patch.object(video_capture.os, "stat", return_value=fake_stat):
+            with mock.patch.object(video_capture.os.path, "realpath", return_value="/dev/input/event0"):
+                self.assertFalse(video_capture._is_safe_video_device_path("/dev/input/event0"))
+
+    def test_safe_video_device_path_rejects_regular_files(self):
+        fake_stat = os.stat_result((stat.S_IFREG | 0o600, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        with mock.patch.object(video_capture.os, "stat", return_value=fake_stat):
+            with mock.patch.object(video_capture.os.path, "realpath", return_value="/dev/video2"):
+                self.assertFalse(video_capture._is_safe_video_device_path("/tmp/video2"))
 
     def test_resolve_device_path_uses_cached_auto_device_before_scanning(self):
         config = config_with_device("auto")
@@ -148,8 +191,9 @@ class VideoCaptureHelpersTest(unittest.TestCase):
         fake_capture = FakeCapture(opened=True)
 
         with mock.patch.object(video_capture.os.path, "exists", return_value=True):
-            with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
-                capture = video_capture.VideoCapture(config, warmup=False)
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config, warmup=False)
 
         self.assertFalse(fake_capture.grabbed)
         capture.release()
@@ -159,8 +203,9 @@ class VideoCaptureHelpersTest(unittest.TestCase):
         fake_capture = FakeCapture(opened=True)
 
         with mock.patch.object(video_capture.os.path, "exists", return_value=True):
-            with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
-                capture = video_capture.VideoCapture(config)
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config)
 
         self.assertTrue(fake_capture.grabbed)
         capture.release()
