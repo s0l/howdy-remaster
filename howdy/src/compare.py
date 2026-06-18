@@ -6,12 +6,10 @@ import configparser
 import json
 import logging
 import os
-import queue
 import select
 import signal
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -20,9 +18,9 @@ import numpy as np
 
 import paths_factory
 import snapshot
+from camera_helper import CameraHelperClient, CameraHelperTimeout
 from face_backends import load_face_backend
 from i18n import _
-from recorders.video_capture import VideoCapture
 
 
 def setup_logger():
@@ -84,6 +82,16 @@ def release_video_capture() -> None:
         logger.warning("Failed to release video capture device: %s", err)
 
 
+def handle_termination(signum, _frame) -> None:
+    logger.info("Received signal %d, terminating helper processes", signum)
+    release_video_capture()
+    exit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, handle_termination)
+signal.signal(signal.SIGINT, handle_termination)
+
+
 def make_snapshot(type: str) -> None:
     """Generate snapshot after detection"""
     snapshot.generate(
@@ -121,29 +129,16 @@ def send_to_ui(type: str, message: str) -> None:
 
 
 def read_frame_before(deadline: float):
-    """Read one camera frame without letting a blocking driver hang PAM auth."""
-    result_queue = queue.Queue(maxsize=1)
-
-    def read_frame():
-        try:
-            result_queue.put(("ok", video_capture.read_frame()))
-        except BaseException as err:
-            result_queue.put(("error", err))
-
-    thread = threading.Thread(target=read_frame, daemon=True)
-    thread.start()
-
-    remaining = max(0.0, deadline - time.time())
     try:
-        status, payload = result_queue.get(timeout=remaining)
-    except queue.Empty:
+        return video_capture.read_frame_before(deadline)
+    except CameraHelperTimeout:
         logger.error("Timed out waiting for camera frame")
+        release_video_capture()
         exit(11)
-
-    if status == "error":
-        raise payload
-
-    return payload
+    except RuntimeError as err:
+        logger.error("Camera helper failed while reading a frame: %s", err)
+        release_video_capture()
+        exit(14)
 
 
 def compatible_encodings(raw_models, backend):
@@ -251,6 +246,7 @@ save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
 gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
+timeout = config.getint("video", "timeout", fallback=DEFAULT_TIMEOUT)
 confirmation_required = os.environ.get("HOWDY_CONFIRM_AUTH") == "1"
 
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
@@ -312,19 +308,25 @@ logger.info("Face backend %s initialized", face_backend.name)
 
 timings["ic"] = time.time()
 logger.info("Opening video capture device")
-video_capture = VideoCapture(config)
+try:
+    video_capture = CameraHelperClient(timeout=timeout, logger=logger)
+except CameraHelperTimeout:
+    logger.error("Timed out opening camera helper")
+    exit(11)
+except RuntimeError as err:
+    logger.error("Could not open camera helper: %s", err)
+    exit(14)
 logger.info("Video capture opened successfully")
 exposure = config.getint("video", "exposure", fallback=-1)
 timings["ic"] = time.time() - timings["ic"]
 logger.info("Camera opened in %.2fs", timings["ic"])
 
 max_height = config.getfloat("video", "max_height", fallback=320.0)
-height = video_capture.internal.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
+height = video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
 if rotate == 2:
-    height = video_capture.internal.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
+    height = video_capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
 scaling_factor = (max_height / height) or 1
 
-timeout = config.getint("video", "timeout", fallback=DEFAULT_TIMEOUT)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
 end_report = config.getboolean("debug", "end_report", fallback=False)
 
@@ -483,5 +485,12 @@ while True:
             exit(0)
 
     if exposure != -1:
-        video_capture.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)
-        video_capture.internal.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+        try:
+            video_capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)
+            video_capture.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
+        except CameraHelperTimeout:
+            logger.error("Timed out setting camera exposure")
+            release_video_capture()
+            exit(11)
+        except RuntimeError as err:
+            logger.error("Failed to set camera exposure: %s", err)

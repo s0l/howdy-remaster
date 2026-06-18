@@ -22,12 +22,16 @@ class FakeCapture:
         self.opened = opened
         self.read_result = read_result
         self.released = False
+        self.grabbed = False
 
     def isOpened(self):
         return self.opened
 
     def read(self):
         return self.read_result
+
+    def grab(self):
+        self.grabbed = True
 
     def release(self):
         self.released = True
@@ -138,6 +142,28 @@ class VideoCaptureHelpersTest(unittest.TestCase):
                 self.assertEqual(video_capture._read_cached_device_path(), "/dev/video2")
                 self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(cache_path)).st_mode), 0o700)
                 self.assertEqual(stat.S_IMODE(os.stat(cache_path).st_mode), 0o600)
+
+    def test_video_capture_can_skip_constructor_warmup_read(self):
+        config = config_with_device("/dev/video9")
+        fake_capture = FakeCapture(opened=True)
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                capture = video_capture.VideoCapture(config, warmup=False)
+
+        self.assertFalse(fake_capture.grabbed)
+        capture.release()
+
+    def test_video_capture_warms_camera_by_default(self):
+        config = config_with_device("/dev/video9")
+        fake_capture = FakeCapture(opened=True)
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                capture = video_capture.VideoCapture(config)
+
+        self.assertTrue(fake_capture.grabbed)
+        capture.release()
 
 
 if __name__ == "__main__":

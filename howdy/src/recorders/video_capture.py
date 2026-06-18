@@ -215,7 +215,7 @@ def resolve_device_path(config, warn=True):
 
 
 class VideoCapture:
-	def __init__(self, config):
+	def __init__(self, config, warmup=True):
 		"""
 		Creates a new VideoCapture instance depending on the settings in the
 		provided config file.
@@ -249,8 +249,10 @@ class VideoCapture:
 			print("\t" + self.device_path)
 			sys.exit(14)
 
-		# Request a frame to wake the camera up
-		self.internal.grab()
+		# Request a frame to wake the camera up. PAM compare can disable this so
+		# its first driver read happens inside a killable helper process.
+		if warmup:
+			self.internal.grab()
 
 	def __del__(self):
 		"""

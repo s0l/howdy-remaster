@@ -15,6 +15,9 @@ class DebianPackagingSecurityTest(unittest.TestCase):
         config_path = os.path.join(ROOT, "howdy", "src", "config.ini")
         with open(config_path, encoding="utf-8") as config_file:
             cls.config = config_file.read()
+        meson_path = os.path.join(ROOT, "howdy", "src", "meson.build")
+        with open(meson_path, encoding="utf-8") as meson_file:
+            cls.meson = meson_file.read()
 
     def test_postinst_does_not_recursive_chown_runtime_state(self):
         self.assertNotRegex(self.script, re.compile(r"chown\s+-R[^\n]*(/etc/howdy|/var/cache/howdy|/var/log/howdy)"))
@@ -40,6 +43,12 @@ class DebianPackagingSecurityTest(unittest.TestCase):
         self.assertRegex(
             self.config,
             re.compile(r"^confirmation_services\s*=\s*polkit-1,sudo,sudo-i\s*$", re.MULTILINE),
+        )
+
+    def test_camera_helper_is_installed_with_python_sources(self):
+        self.assertRegex(
+            self.meson,
+            re.compile(r"py_sources\s*=\s*\[[^\]]*'camera_helper\.py'", re.DOTALL),
         )
 
 

@@ -27,6 +27,7 @@ py_sources = [
     'cli/set.py',
     'cli/snap.py',
     'cli/test.py',
+    'camera_helper.py',
     'cli.py',
     'compare.py',
     'face_backends/__init__.py',
