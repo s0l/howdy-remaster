@@ -122,6 +122,7 @@ class CameraHelperClient:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            close_fds=True,
         )
 
         deadline = time.time() + timeout

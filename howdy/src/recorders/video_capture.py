@@ -6,6 +6,7 @@ import configparser
 import cv2
 import glob
 import os
+import stat
 import sys
 import tempfile
 
@@ -60,6 +61,25 @@ def _camera_can_open(path):
 	capture.release()
 
 	return opened
+
+
+def _is_safe_video_device_path(path):
+	try:
+		path_stat = os.stat(path)
+	except OSError:
+		return False
+
+	if not stat.S_ISCHR(path_stat.st_mode):
+		return False
+
+	real_path = os.path.realpath(path)
+	device = os.path.basename(real_path)
+
+	return (
+		os.path.dirname(real_path) == "/dev"
+		and device.startswith("video")
+		and device[5:].isdigit()
+	)
 
 
 def _read_cached_device_path():
@@ -172,8 +192,15 @@ def discover_camera_devices(probe=True):
 
 def resolve_device_path(config, warn=True):
 	configured_path = config.get("video", "device_path", fallback="none").strip()
+	allow_unsafe_path = config.getboolean("video", "allow_unsafe_device_path", fallback=False)
 
 	if configured_path.lower() not in AUTO_DEVICE_PATHS and os.path.exists(configured_path):
+		if not allow_unsafe_path and not _is_safe_video_device_path(configured_path):
+			if warn:
+				print(_("Configured camera path is not a safe V4L video device:"))
+				print("\t" + configured_path)
+				print(_("Use a /dev/video* device or /dev/v4l symlink, or enable allow_unsafe_device_path."))
+			sys.exit(14)
 		return configured_path
 
 	cached_path = _read_cached_device_path()
