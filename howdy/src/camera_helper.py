@@ -5,10 +5,12 @@ camera driver calls that may block inside OpenCV/V4L native code.
 """
 
 import configparser
+import ctypes
 import io
 import json
 import os
 import select
+import signal
 import struct
 import subprocess
 import sys
@@ -25,10 +27,24 @@ SET_PROPERTY = b"S"
 QUIT = b"Q"
 HEADER_SIZE = 5
 MAX_MESSAGE_SIZE = 64 * 1024 * 1024
+PR_SET_PDEATHSIG = 1
 
 
 class CameraHelperTimeout(TimeoutError):
     pass
+
+
+def set_parent_death_signal():
+    """Ask Linux to terminate the helper if compare.py disappears."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    result = libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0)
+    if result != 0:
+        errno = ctypes.get_errno()
+        raise OSError(errno, os.strerror(errno))
+
+    # Close the race where the parent died just before prctl was installed.
+    if os.getppid() == 1:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _encode_payload(status, payload):
@@ -216,6 +232,8 @@ class CameraHelperClient:
 
 
 def helper_main():
+    set_parent_death_signal()
+
     # Reserve stdout for the binary frame protocol. Legacy capture code may
     # print warnings/errors; send those to stderr so the protocol stays intact.
     protocol_stdout = os.fdopen(os.dup(sys.stdout.fileno()), "wb", buffering=0)
