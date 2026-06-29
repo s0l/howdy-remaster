@@ -30,6 +30,7 @@ py_sources = [
     'camera_helper.py',
     'cli.py',
     'compare.py',
+    'frame_quality.py',
     'face_backends/__init__.py',
     'face_backends/opencv_sface.py',
     'i18n.py',

@@ -14,12 +14,18 @@ import time
 from datetime import datetime, timezone
 
 import cv2
-import numpy as np
 
 import paths_factory
 import snapshot
 from camera_helper import CameraHelperClient, CameraHelperTimeout
 from face_backends import load_face_backend
+from frame_quality import (
+    classify_face_lighting,
+    is_backlit_scene,
+    is_black_frame,
+    is_unlit_frame,
+    light_metrics,
+)
 from i18n import _
 
 
@@ -240,7 +246,6 @@ if not encodings:
     logger.error("No compatible face models for backend %s", face_backend.name)
     exit(10)
 
-dark_threshold = config.getfloat("video", "dark_threshold", fallback=50.0)
 end_report = config.getboolean("debug", "end_report", fallback=False)
 save_failed = config.getboolean("snapshots", "save_failed", fallback=False)
 save_successful = config.getboolean("snapshots", "save_successful", fallback=False)
@@ -317,7 +322,6 @@ except RuntimeError as err:
     logger.error("Could not open camera helper: %s", err)
     exit(14)
 logger.info("Video capture opened successfully")
-exposure = config.getint("video", "exposure", fallback=-1)
 timings["ic"] = time.time() - timings["ic"]
 logger.info("Camera opened in %.2fs", timings["ic"])
 
@@ -327,7 +331,8 @@ if rotate == 2:
     height = video_capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
 scaling_factor = (max_height / height) or 1
 
-dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
+unlit_threshold = config.getfloat("video", "unlit_threshold", fallback=24.0)
+dark_threshold = config.getfloat("video", "dark_threshold", fallback=60.0)
 end_report = config.getboolean("debug", "end_report", fallback=False)
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -355,12 +360,12 @@ while True:
             dark_tries,
         )
 
-        if dark_tries == valid_frames:
-            print(_("All frames were too dark, please check dark_threshold in config"))
+        if valid_frames == 0 and dark_tries > 0:
+            print(_("All frames were unlit, please check IR emitter, device_fps or unlit_threshold in config"))
             print(
-                _("Average darkness: {avg}, Threshold: {threshold}").format(
-                    avg=str(dark_running_total / max(1, valid_frames)),
-                    threshold=str(dark_threshold),
+                _("Average darkness: {avg}, P95 threshold: {threshold}").format(
+                    avg=str(dark_running_total / max(1, dark_tries)),
+                    threshold=str(unlit_threshold),
                 )
             )
             exit(13)
@@ -368,38 +373,31 @@ while True:
         exit(11)
 
     frame, gsframe = read_frame_before(deadline)
-    gsframe = clahe.apply(gsframe)
+    raw_gsframe = gsframe
+    metrics = light_metrics(raw_gsframe)
 
     if save_failed or save_successful:
         if len(snapframes) < 3:
             snapframes.append(frame)
 
-    hist = cv2.calcHist([gsframe], [0], None, [8], [0, 256])
-    hist_total = np.sum(hist)
-    darkness = float(hist[0][0] / hist_total * 100)
-
     logger.debug(
-        "Frame %d: darkness=%.1f%%, valid_frames=%d, dark_tries=%d",
+        "Frame %d: dark_pixels=%.1f%%, p95=%.1f, valid_frames=%d, dark_tries=%d",
         frames,
-        darkness,
+        metrics["dark_percent"],
+        metrics["p95"],
         valid_frames,
         dark_tries,
     )
 
-    if (hist_total == 0) or (darkness == 100):
+    if is_black_frame(raw_gsframe):
         black_tries += 1
         send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
 
-    dark_running_total += darkness
     valid_frames += 1
-
-    if darkness > dark_threshold:
-        dark_tries += 1
-        send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
-        continue
-
     send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
+    raw_scan_frame = raw_gsframe
+    gsframe = clahe.apply(raw_gsframe)
 
     if scaling_factor != 1:
         frame = cv2.resize(
@@ -416,29 +414,76 @@ while True:
             fy=scaling_factor,
             interpolation=cv2.INTER_AREA,
         )
+        raw_scan_frame = cv2.resize(
+            raw_scan_frame,
+            None,
+            fx=scaling_factor,
+            fy=scaling_factor,
+            interpolation=cv2.INTER_AREA,
+        )
 
     if rotate == 1:
         if frames % 3 == 1:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            raw_scan_frame = cv2.rotate(raw_scan_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         if frames % 3 == 2:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
+            raw_scan_frame = cv2.rotate(raw_scan_frame, cv2.ROTATE_90_CLOCKWISE)
     elif rotate == 2:
         if frames % 2 == 0:
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            raw_scan_frame = cv2.rotate(raw_scan_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         else:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
             gsframe = cv2.rotate(gsframe, cv2.ROTATE_90_CLOCKWISE)
+            raw_scan_frame = cv2.rotate(raw_scan_frame, cv2.ROTATE_90_CLOCKWISE)
 
     face_locations = face_backend.detect(frame, gsframe)
     logger.debug("Frame %d: detected %d face(s)", frames, len(face_locations))
 
     if not face_locations:
-        send_to_ui("M", _("Look at the camera"))
+        backlit_scene = is_backlit_scene(raw_scan_frame)
+        if backlit_scene:
+            send_to_ui("M", _("Backlit scene, adjusting exposure"))
+            try:
+                bracket = video_capture.advance_exposure_bracket()
+                logger.debug("Frame %d: exposure bracket result=%s", frames, bracket)
+            except (CameraHelperTimeout, RuntimeError) as err:
+                logger.debug("Frame %d: exposure bracket unavailable: %s", frames, err)
+        if is_unlit_frame(raw_gsframe, unlit_threshold):
+            dark_tries += 1
+            dark_running_total += metrics["dark_percent"]
+            send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
+        elif not backlit_scene:
+            send_to_ui("M", _("Look at the camera"))
 
     for face_location in face_locations:
+        lighting = classify_face_lighting(raw_scan_frame, face_location, dark_threshold=dark_threshold)
+        logger.debug(
+            "Frame %d: face_lighting=%s face_dark=%.1f%% face_p95=%.1f global_p95=%.1f",
+            frames,
+            lighting["state"],
+            lighting["face"]["dark_percent"],
+            lighting["face"]["p95"],
+            lighting["global"]["p95"],
+        )
+        if lighting["face_dark"]:
+            dark_tries += 1
+            dark_running_total += lighting["face"]["dark_percent"]
+            send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
+            send_to_ui(
+                "M",
+                _("Face is underexposed") if not lighting["backlit"] else _("Face is backlit"),
+            )
+            try:
+                tuning = video_capture.tune_for_dark_face(backlit=lighting["backlit"])
+                logger.debug("Frame %d: camera tuning result=%s", frames, tuning)
+            except (CameraHelperTimeout, RuntimeError) as err:
+                logger.debug("Frame %d: camera tuning unavailable: %s", frames, err)
+
         face_encoding = face_backend.encode(frame, face_location)
         match_index, match = face_backend.match(encodings, face_encoding)
 
@@ -483,14 +528,3 @@ while True:
                 exit(15)
 
             exit(0)
-
-    if exposure != -1:
-        try:
-            video_capture.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)
-            video_capture.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
-        except CameraHelperTimeout:
-            logger.error("Timed out setting camera exposure")
-            release_video_capture()
-            exit(11)
-        except RuntimeError as err:
-            logger.error("Failed to set camera exposure: %s", err)
