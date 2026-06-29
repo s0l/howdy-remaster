@@ -6,7 +6,9 @@ import configparser
 import cv2
 import glob
 import os
+import re
 import stat
+import subprocess
 import sys
 import tempfile
 
@@ -14,6 +16,7 @@ from i18n import _
 
 AUTO_DEVICE_PATHS = {"", "none", "auto"}
 DEVICE_CACHE_PATH = "/var/cache/howdy/device_path"
+EXPOSURE_CONTROL_NAMES = ("exposure_time_absolute", "exposure_absolute")
 
 
 def _video_device_name(path):
@@ -117,6 +120,77 @@ def _is_gray_frame(frame):
 		return True
 
 	return bool((frame[:, :, 0] == frame[:, :, 1]).all() and (frame[:, :, 1] == frame[:, :, 2]).all())
+
+
+def parse_v4l2_controls(text):
+	controls = {}
+	current = None
+
+	for raw_line in text.splitlines():
+		line = raw_line.rstrip()
+		match = re.match(
+			r"\s*([A-Za-z0-9_]+)\s+0x[0-9a-fA-F]+\s+\(([^)]+)\)\s*:\s*(.*)",
+			line,
+		)
+		if match:
+			name, kind, rest = match.groups()
+			control = {"type": kind, "raw": rest, "menu": {}}
+			for key, value in re.findall(r"([A-Za-z_]+)=(-?\d+)", rest):
+				control[key] = int(value)
+			if "min" in control:
+				control["minimum"] = control["min"]
+			if "max" in control:
+				control["maximum"] = control["max"]
+			controls[name] = control
+			current = name
+			continue
+
+		menu_match = re.match(r"\s*(-?\d+):\s*(.*)", line)
+		if menu_match and current:
+			value, label = menu_match.groups()
+			controls[current]["menu"][int(value)] = label.strip()
+
+	return controls
+
+
+def read_v4l2_controls(path, timeout=0.3):
+	try:
+		completed = subprocess.run(
+			["v4l2-ctl", "-d", path, "--list-ctrls-menus"],
+			check=False,
+			stdout=subprocess.PIPE,
+			stderr=subprocess.DEVNULL,
+			text=True,
+			timeout=timeout,
+		)
+	except (OSError, subprocess.TimeoutExpired):
+		return {}
+
+	if completed.returncode != 0:
+		return {}
+
+	return parse_v4l2_controls(completed.stdout)
+
+
+def exposure_control_from_v4l2(controls):
+	for name in EXPOSURE_CONTROL_NAMES:
+		control = controls.get(name)
+		if control and "minimum" in control and "maximum" in control:
+			return name, control
+	return None, None
+
+
+def parse_float_list(value):
+	result = []
+	for item in value.split(","):
+		item = item.strip()
+		if not item:
+			continue
+		try:
+			result.append(float(item))
+		except ValueError:
+			continue
+	return result
 
 
 def _score_device(path, probe=True):
@@ -269,6 +343,18 @@ class VideoCapture:
 		self.fw = None
 		# The frame height
 		self.fh = None
+		self.exposure = -1
+		self._manual_exposure_enabled = False
+		self._tune_attempts = 0
+		self._max_tune_attempts = self.config.getint("video", "auto_exposure_max_steps", fallback=4)
+		self._exposure_tune_step = self.config.getfloat("video", "auto_exposure_step", fallback=1.0)
+		self._bracket_offsets = []
+		self._bracket_targets = []
+		self._bracket_index = 0
+		self._bracket_base_exposure = None
+		self._v4l2_controls = {}
+		self._exposure_control_name = None
+		self._exposure_control = None
 		self._create_reader()
 
 		if hasattr(self.internal, "isOpened") and not self.internal.isOpened():
@@ -315,6 +401,8 @@ class VideoCapture:
 			print(_("Failed to read camera specified in the 'device_path' config option, aborting"))
 			sys.exit(14)
 
+		self._apply_manual_exposure()
+
 		try:
 			# Convert from color to grayscale
 			# First processing of frame, so frame errors show up here
@@ -325,6 +413,173 @@ class VideoCapture:
 			print("\nAn error occurred in OpenCV\n")
 			raise
 		return frame, gsframe
+
+	def _apply_manual_exposure(self):
+		if not self._manual_exposure_enabled:
+			return
+
+		# Some V4L cameras accept manual exposure only after streaming starts,
+		# and may need the setting repeated while their first frames settle.
+		self.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)  # 1 = Manual
+		self.internal.set(cv2.CAP_PROP_EXPOSURE, float(self.exposure))
+
+	def tune_for_dark_face(self, backlit=False):
+		if self._tune_attempts >= self._max_tune_attempts:
+			return {"changed": False, "reason": "max_steps"}
+
+		self._tune_attempts += 1
+		results = {}
+
+		def set_prop(name, prop, value):
+			try:
+				results[name] = bool(self.internal.set(prop, value))
+			except Exception as err:
+				results[name] = str(err)
+
+		def nudge_prop(name, prop, delta):
+			try:
+				current = self.internal.get(prop)
+			except Exception as err:
+				results[name] = str(err)
+				return
+			if current is None or current < 0:
+				results[name] = False
+				return
+			set_prop(name, prop, float(current) + delta)
+
+		if backlit and hasattr(cv2, "CAP_PROP_BACKLIGHT"):
+			set_prop("backlight", cv2.CAP_PROP_BACKLIGHT, 1.0)
+
+		if hasattr(cv2, "CAP_PROP_BRIGHTNESS"):
+			nudge_prop("brightness", cv2.CAP_PROP_BRIGHTNESS, self._exposure_tune_step)
+		if hasattr(cv2, "CAP_PROP_GAIN"):
+			nudge_prop("gain", cv2.CAP_PROP_GAIN, self._exposure_tune_step)
+
+		try:
+			current_exposure = self.internal.get(cv2.CAP_PROP_EXPOSURE)
+		except Exception as err:
+			results["exposure"] = str(err)
+		else:
+			if current_exposure is not None:
+				self.exposure = float(current_exposure) + self._exposure_tune_step
+				self._manual_exposure_enabled = True
+				set_prop("auto_exposure", cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)
+				set_prop("exposure", cv2.CAP_PROP_EXPOSURE, self.exposure)
+
+		return {
+			"changed": any(value is True for value in results.values()),
+			"attempt": self._tune_attempts,
+			"results": results,
+		}
+
+	def _build_exposure_bracket_offsets(self):
+		step = self.config.getfloat("video", "exposure_bracket_step", fallback=0.5)
+		range_limit = self.config.getfloat("video", "exposure_bracket_range", fallback=3.0)
+		if step <= 0 or range_limit <= 0:
+			return []
+
+		steps = int(range_limit / step)
+		positive = [round(step * index, 3) for index in range(1, steps + 1)]
+		negative = [-offset for offset in positive]
+		order = self.config.get("video", "exposure_bracket_order", fallback="positive-first").strip().lower()
+
+		if order == "negative-first":
+			return negative + positive
+		if order == "interleave":
+			offsets = []
+			for pos, neg in zip(positive, negative):
+				offsets.extend([pos, neg])
+			return offsets
+
+		return positive + negative
+
+	def _build_native_exposure_targets(self, base):
+		if not self._exposure_control:
+			return []
+
+		minimum = self._exposure_control.get("minimum", 0)
+		maximum = self._exposure_control.get("maximum", 0)
+		step = max(1, self._exposure_control.get("step", 1))
+		if maximum <= minimum:
+			return []
+
+		configured = self.config.get(
+			"video",
+			"exposure_bracket_multipliers",
+			fallback="1.5,2,3,4,6,8,12,16,0.75,0.5",
+		)
+		multipliers = parse_float_list(configured)
+		if not multipliers:
+			multipliers = [1.5, 2, 3, 4, 6, 8, 12, 16, 0.75, 0.5]
+
+		targets = []
+		for multiplier in multipliers:
+			target = int(round(base * multiplier))
+			target = max(minimum, min(maximum, target))
+			target = int(round(target / step) * step)
+			target = max(minimum, min(maximum, target))
+			if target != int(base) and target not in targets:
+				targets.append(target)
+		return targets
+
+	def reset_exposure_bracket(self):
+		self._bracket_index = 0
+
+	def advance_exposure_bracket(self):
+		if not self.config.getboolean("video", "exposure_bracket", fallback=True):
+			return {"changed": False, "reason": "disabled"}
+
+		try:
+			current_exposure = self.internal.get(cv2.CAP_PROP_EXPOSURE)
+		except Exception as err:
+			return {"changed": False, "reason": str(err)}
+
+		if self._bracket_base_exposure is None:
+			self._bracket_base_exposure = float(current_exposure or 0)
+
+		strategy = "opencv_offset"
+		if self._exposure_control:
+			strategy = "native_exposure_absolute"
+			if not self._bracket_targets:
+				self._bracket_targets = self._build_native_exposure_targets(self._bracket_base_exposure)
+			targets = self._bracket_targets
+		else:
+			if not self._bracket_offsets:
+				self._bracket_offsets = self._build_exposure_bracket_offsets()
+			targets = [self._bracket_base_exposure + offset for offset in self._bracket_offsets]
+
+		if not targets:
+			return {"changed": False, "reason": "empty", "strategy": strategy}
+		if self._bracket_index >= len(targets):
+			return {"changed": False, "reason": "exhausted", "strategy": strategy}
+
+		target = targets[self._bracket_index]
+		offset = target - self._bracket_base_exposure
+		self._bracket_index += 1
+		self.exposure = target
+		self._manual_exposure_enabled = True
+
+		results = {}
+		try:
+			results["auto_exposure"] = bool(self.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0))
+		except Exception as err:
+			results["auto_exposure"] = str(err)
+		try:
+			results["exposure"] = bool(self.internal.set(cv2.CAP_PROP_EXPOSURE, target))
+		except Exception as err:
+			results["exposure"] = str(err)
+
+		return {
+			"changed": any(value is True for value in results.values()),
+			"offset": offset,
+			"target": target,
+			"base": self._bracket_base_exposure,
+			"step": self._bracket_index,
+			"total": len(targets),
+			"strategy": strategy,
+			"control": self._exposure_control_name,
+			"results": results,
+		}
 
 	def _create_reader(self):
 		"""
@@ -351,6 +606,10 @@ class VideoCapture:
 		else:
 			# Start video capture on the IR camera through OpenCV
 			self.internal = _open_opencv_capture(self.device_path)
+			self._v4l2_controls = read_v4l2_controls(self.device_path)
+			self._exposure_control_name, self._exposure_control = exposure_control_from_v4l2(self._v4l2_controls)
+			self.exposure = self.config.getint("video", "exposure", fallback=-1)
+			self._manual_exposure_enabled = self.exposure != -1
 			# Set the capture frame rate
 			# Without this the first detected (and possibly lower) frame rate is used, -1 seems to select the highest
 			# Use 0 as a fallback to avoid breaking an existing setup, new installs should default to -1

@@ -24,6 +24,8 @@ FRAME = b"F"
 ERROR = b"E"
 READ_FRAME = b"F"
 SET_PROPERTY = b"S"
+TUNE_FACE = b"T"
+BRACKET_EXPOSURE = b"B"
 QUIT = b"Q"
 HEADER_SIZE = 5
 MAX_MESSAGE_SIZE = 64 * 1024 * 1024
@@ -197,6 +199,43 @@ class CameraHelperClient:
 
         return bool(response)
 
+    def tune_for_dark_face(self, backlit=False, timeout=0.5):
+        if self.process.stdin is None:
+            raise RuntimeError("camera helper stdin is unavailable")
+
+        payload = json.dumps({"backlit": bool(backlit)}, separators=(",", ":")).encode("utf-8")
+        try:
+            self.process.stdin.write(TUNE_FACE + struct.pack("!I", len(payload)) + payload)
+            self.process.stdin.flush()
+        except BrokenPipeError as err:
+            raise RuntimeError("camera helper is not accepting tuning requests") from err
+
+        status, response = self._read_message(time.time() + timeout)
+        if status == ERROR:
+            raise RuntimeError(response)
+        if status != READY:
+            raise RuntimeError("camera helper sent an invalid tuning response")
+
+        return response
+
+    def advance_exposure_bracket(self, timeout=0.5):
+        if self.process.stdin is None:
+            raise RuntimeError("camera helper stdin is unavailable")
+
+        try:
+            self.process.stdin.write(BRACKET_EXPOSURE)
+            self.process.stdin.flush()
+        except BrokenPipeError as err:
+            raise RuntimeError("camera helper is not accepting bracket requests") from err
+
+        status, response = self._read_message(time.time() + timeout)
+        if status == ERROR:
+            raise RuntimeError(response)
+        if status != READY:
+            raise RuntimeError("camera helper sent an invalid bracket response")
+
+        return response
+
     def release(self):
         self.close()
 
@@ -292,6 +331,35 @@ def helper_main():
                     return 1
                 prop, setting = json.loads(payload.decode("utf-8"))
                 result = video_capture.internal.set(prop, setting)
+                write_message(protocol_stdout, READY, result)
+            except BaseException as err:
+                write_message(protocol_stdout, ERROR, err)
+            continue
+
+        if command == TUNE_FACE:
+            try:
+                size_data = sys.stdin.buffer.read(4)
+                if len(size_data) != 4:
+                    return 1
+                payload_size = struct.unpack("!I", size_data)[0]
+                if payload_size > MAX_MESSAGE_SIZE:
+                    write_message(protocol_stdout, ERROR, "tuning message is too large")
+                    continue
+                payload = sys.stdin.buffer.read(payload_size)
+                if len(payload) != payload_size:
+                    return 1
+                request = json.loads(payload.decode("utf-8"))
+                result = video_capture.tune_for_dark_face(
+                    backlit=bool(request.get("backlit", False))
+                )
+                write_message(protocol_stdout, READY, result)
+            except BaseException as err:
+                write_message(protocol_stdout, ERROR, err)
+            continue
+
+        if command == BRACKET_EXPOSURE:
+            try:
+                result = video_capture.advance_exposure_bracket()
                 write_message(protocol_stdout, READY, result)
             except BaseException as err:
                 write_message(protocol_stdout, ERROR, err)

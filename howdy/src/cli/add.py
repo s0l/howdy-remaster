@@ -8,11 +8,11 @@ import json
 import configparser
 import builtins
 import subprocess
-import numpy as np
 import paths_factory
 import lockscreen_permissions
 
 from face_backends import load_face_backend
+from frame_quality import is_black_frame, is_face_too_dark, is_unlit_frame, light_metrics
 from recorders.video_capture import VideoCapture
 from i18n import _
 
@@ -115,8 +115,10 @@ dark_tries = 0
 # Track the running darkness total
 dark_running_total = 0
 face_locations = None
+accepted_face_location = None
 
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
+unlit_threshold = config.getfloat("video", "unlit_threshold", fallback=24.0)
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
@@ -126,36 +128,32 @@ while frames < 60:
 	# Grab a single frame of video
 	frame, gsframe = video_capture.read_frame()
 	gsframe = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-	gsframe = clahe.apply(gsframe)
+	raw_gsframe = gsframe
 
-	# Create a histogram of the image with 8 values
-	hist = cv2.calcHist([gsframe], [0], None, [8], [0, 256])
-	# All values combined for percentage calculation
-	hist_total = np.sum(hist)
+	metrics = light_metrics(raw_gsframe)
 
-	# Calculate frame darkness
-	darkness = (hist[0] / hist_total * 100)
-
-	# If the image is fully black due to a bad camera read,
-	# skip to the next frame
-	if (hist_total == 0) or (darkness == 100):
+	if is_black_frame(raw_gsframe):
 		continue
 
-	# Include this frame in calculating our average session brightness
-	dark_running_total += darkness
-	valid_frames += 1
-
-	# If the image exceeds darkness threshold due to subject distance,
-	# skip to the next frame
-	if (darkness > dark_threshold):
+	if is_unlit_frame(raw_gsframe, unlit_threshold):
+		dark_running_total += metrics["dark_percent"]
 		dark_tries += 1
 		continue
+
+	valid_frames += 1
+	gsframe = clahe.apply(raw_gsframe)
 
 	# Get all faces from that frame as encodings
 	face_locations = face_backend.detect(frame, gsframe)
 
 	# If we've found at least one, we can continue
 	if face_locations:
+		if len(face_locations) == 1 and is_face_too_dark(gsframe, face_locations[0], dark_threshold):
+			dark_running_total += light_metrics(gsframe)["dark_percent"]
+			dark_tries += 1
+			face_locations = None
+			continue
+		accepted_face_location = face_locations[0]
 		break
 
 video_capture.release()
@@ -164,9 +162,9 @@ video_capture.release()
 if not face_locations:
 	if valid_frames == 0:
 		print(_("Camera saw only black frames - is IR emitter working?"))
-	elif valid_frames == dark_tries:
-		print(_("All frames were too dark, please check dark_threshold in config"))
-		print(_("Average darkness: {avg}, Threshold: {threshold}").format(avg=str(dark_running_total / valid_frames), threshold=str(dark_threshold)))
+	elif dark_tries > 0:
+		print(_("All frames were too dark, please check IR emitter, device_fps, unlit_threshold or dark_threshold in config"))
+		print(_("Average darkness: {avg}, Threshold: {threshold}").format(avg=str(dark_running_total / dark_tries), threshold=str(dark_threshold)))
 	else:
 		print(_("No face detected, aborting"))
 	sys.exit(1)
@@ -176,7 +174,7 @@ elif len(face_locations) > 1:
 	print(_("Multiple faces detected, aborting"))
 	sys.exit(1)
 
-face_location = face_locations[0]
+face_location = accepted_face_location or face_locations[0]
 
 # Get the encodings in the frame
 face_encoding = face_backend.encode(frame, face_location)

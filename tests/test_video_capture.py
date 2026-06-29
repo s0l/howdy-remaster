@@ -23,6 +23,8 @@ class FakeCapture:
         self.read_result = read_result
         self.released = False
         self.grabbed = False
+        self.settings = []
+        self.values = {}
 
     def isOpened(self):
         return self.opened
@@ -35,6 +37,14 @@ class FakeCapture:
 
     def release(self):
         self.released = True
+
+    def set(self, prop, value):
+        self.settings.append((prop, value))
+        self.values[prop] = value
+        return True
+
+    def get(self, prop):
+        return self.values.get(prop, 0)
 
 
 def config_with_device(path):
@@ -208,6 +218,141 @@ class VideoCaptureHelpersTest(unittest.TestCase):
                     capture = video_capture.VideoCapture(config)
 
         self.assertTrue(fake_capture.grabbed)
+        capture.release()
+
+    def test_video_capture_reapplies_manual_exposure_after_each_read(self):
+        frame = np.zeros((2, 2, 3), dtype=np.uint8)
+        config = config_with_device("/dev/video9")
+        config["video"]["exposure"] = "42"
+        fake_capture = FakeCapture(opened=True, read_result=(True, frame))
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config, warmup=False)
+
+        capture.read_frame()
+
+        self.assertEqual(
+            fake_capture.settings,
+            [
+                (video_capture.cv2.CAP_PROP_AUTO_EXPOSURE, 1.0),
+                (video_capture.cv2.CAP_PROP_EXPOSURE, 42.0),
+            ],
+        )
+        capture.release()
+
+    def test_video_capture_tunes_for_backlit_dark_face(self):
+        config = config_with_device("/dev/video9")
+        fake_capture = FakeCapture(opened=True)
+        fake_capture.values = {
+            video_capture.cv2.CAP_PROP_BRIGHTNESS: 10,
+            video_capture.cv2.CAP_PROP_GAIN: 20,
+            video_capture.cv2.CAP_PROP_EXPOSURE: 30,
+        }
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config, warmup=False)
+
+        result = capture.tune_for_dark_face(backlit=True)
+
+        self.assertTrue(result["changed"])
+        self.assertIn((video_capture.cv2.CAP_PROP_BACKLIGHT, 1.0), fake_capture.settings)
+        self.assertIn((video_capture.cv2.CAP_PROP_BRIGHTNESS, 11.0), fake_capture.settings)
+        self.assertIn((video_capture.cv2.CAP_PROP_GAIN, 21.0), fake_capture.settings)
+        self.assertIn((video_capture.cv2.CAP_PROP_AUTO_EXPOSURE, 1.0), fake_capture.settings)
+        self.assertIn((video_capture.cv2.CAP_PROP_EXPOSURE, 31.0), fake_capture.settings)
+        capture.release()
+
+    def test_video_capture_tuning_stops_after_configured_steps(self):
+        config = config_with_device("/dev/video9")
+        config["video"]["auto_exposure_max_steps"] = "1"
+        fake_capture = FakeCapture(opened=True)
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config, warmup=False)
+
+        first = capture.tune_for_dark_face(backlit=False)
+        second = capture.tune_for_dark_face(backlit=False)
+
+        self.assertTrue(first["changed"])
+        self.assertEqual(second["reason"], "max_steps")
+        capture.release()
+
+    def test_video_capture_exposure_bracket_tries_positive_offsets_first(self):
+        config = config_with_device("/dev/video9")
+        config["video"]["exposure_bracket_range"] = "1.0"
+        config["video"]["exposure_bracket_step"] = "0.5"
+        fake_capture = FakeCapture(opened=True)
+        fake_capture.values = {video_capture.cv2.CAP_PROP_EXPOSURE: 10}
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    capture = video_capture.VideoCapture(config, warmup=False)
+
+        first = capture.advance_exposure_bracket()
+        second = capture.advance_exposure_bracket()
+        third = capture.advance_exposure_bracket()
+        fourth = capture.advance_exposure_bracket()
+        exhausted = capture.advance_exposure_bracket()
+
+        self.assertEqual(first["offset"], 0.5)
+        self.assertEqual(first["target"], 10.5)
+        self.assertEqual(second["offset"], 1.0)
+        self.assertEqual(third["offset"], -0.5)
+        self.assertEqual(fourth["offset"], -1.0)
+        self.assertEqual(exhausted["reason"], "exhausted")
+        capture.release()
+
+    def test_parse_v4l2_controls_reads_exposure_range(self):
+        text = """
+                     auto_exposure 0x009a0901 (menu)   : min=0 max=3 default=3 value=3 (Aperture Priority Mode)
+                         1: Manual Mode
+                         3: Aperture Priority Mode
+             exposure_time_absolute 0x009a0902 (int)    : min=50 max=10000 step=1 default=166 value=166 flags=inactive, has-min-max
+        """
+
+        controls = video_capture.parse_v4l2_controls(text)
+        name, control = video_capture.exposure_control_from_v4l2(controls)
+
+        self.assertEqual(name, "exposure_time_absolute")
+        self.assertEqual(control["minimum"], 50)
+        self.assertEqual(control["maximum"], 10000)
+        self.assertEqual(control["step"], 1)
+
+    def test_video_capture_native_exposure_bracket_uses_multipliers(self):
+        config = config_with_device("/dev/video9")
+        fake_capture = FakeCapture(opened=True)
+        fake_capture.values = {video_capture.cv2.CAP_PROP_EXPOSURE: 166}
+        controls = {
+            "exposure_time_absolute": {
+                "minimum": 50,
+                "maximum": 10000,
+                "step": 1,
+                "default": 166,
+                "value": 166,
+            }
+        }
+
+        with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+            with mock.patch.object(video_capture, "_is_safe_video_device_path", return_value=True):
+                with mock.patch.object(video_capture, "_open_opencv_capture", return_value=fake_capture):
+                    with mock.patch.object(video_capture, "read_v4l2_controls", return_value=controls):
+                        capture = video_capture.VideoCapture(config, warmup=False)
+
+        first = capture.advance_exposure_bracket()
+        second = capture.advance_exposure_bracket()
+        third = capture.advance_exposure_bracket()
+
+        self.assertEqual(first["strategy"], "native_exposure_absolute")
+        self.assertEqual(first["target"], 249)
+        self.assertEqual(second["target"], 332)
+        self.assertEqual(third["target"], 498)
         capture.release()
 
 

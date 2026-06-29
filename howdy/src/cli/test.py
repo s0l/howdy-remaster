@@ -8,10 +8,10 @@ import json
 import sys
 import time
 import cv2
-import numpy as np
 import paths_factory
 
 from face_backends import load_face_backend
+from frame_quality import classify_face_lighting, is_backlit_scene, is_unlit_frame
 from i18n import _
 from recorders.video_capture import VideoCapture
 
@@ -27,8 +27,8 @@ video_capture = VideoCapture(config)
 
 # Read config values to use in the main loop
 video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
-exposure = config.getint("video", "exposure", fallback=-1)
-dark_threshold = config.getfloat("video", "dark_threshold", fallback=60)
+unlit_threshold = config.getfloat("video", "unlit_threshold", fallback=24.0)
+dark_threshold = config.getfloat("video", "dark_threshold", fallback=60.0)
 
 # Let the user know what's up
 print(_("""
@@ -137,6 +137,8 @@ try:
 		# Grab a single frame of video
 		orig_frame, frame = video_capture.read_frame()
 
+		raw_frame = frame
+		is_unlit = is_unlit_frame(frame, unlit_threshold)
 		frame = clahe.apply(frame)
 		# Make a frame to put overlays in
 		overlay = frame.copy()
@@ -149,13 +151,9 @@ try:
 		hist = cv2.calcHist([frame], [0], None, [8], [0, 256])
 		# All values combined for percentage calculation
 		hist_total = int(sum(hist)[0])
-		# Fill with the overall containing percentage
-		hist_perc = []
-
 		# Loop though all values to calculate a percentage and add it to the overlay
 		for index, value in enumerate(hist):
 			value_perc = float(value[0]) / hist_total * 100
-			hist_perc.append(value_perc)
 
 			# Top left point, 10px margins
 			p1 = (20 + (10 * index), 10)
@@ -174,8 +172,8 @@ try:
 		if slow_mode:
 			cv2.putText(overlay, _("SLOW MODE"), (width - 66, height - 10), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255), 0, cv2.LINE_AA)
 
-		# Ignore dark frames
-		if hist_perc[0] > dark_threshold:
+		# Ignore only frames that are globally unlit before contrast enhancement.
+		if is_unlit:
 			# Show that this is an ignored frame in the top right
 			cv2.putText(overlay, _("DARK FRAME"), (width - 68, 16), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255), 0, cv2.LINE_AA)
 		else:
@@ -190,10 +188,18 @@ try:
 			frame_status = None
 
 			if not face_locations:
-				frame_status = _("NO FACE")
+				if is_backlit_scene(raw_frame):
+					bracket = video_capture.advance_exposure_bracket()
+					frame_status = _("BACKLIT NO FACE: exposure {target} ({strategy})").format(
+						target=bracket.get("target", bracket.get("reason", "?")),
+						strategy=bracket.get("strategy", "?"),
+					)
+				else:
+					frame_status = _("NO FACE")
 
 			# Loop though all faces and paint a circle around them
 			for loc in face_locations:
+				lighting = classify_face_lighting(raw_frame, loc, dark_threshold=dark_threshold)
 				# By default the circle around the face is red for no match
 				color = (0, 0, 230)
 
@@ -236,6 +242,11 @@ try:
 				else:
 					frame_status = _("FACE DETECTED: no compatible models loaded")
 
+				if lighting["backlit"]:
+					frame_status = _("BACKLIT FACE")
+				elif lighting["face_dark"]:
+					frame_status = _("FACE DARK")
+
 				# Draw the Circle in green
 				cv2.circle(overlay, (x, y), r, color, 2)
 
@@ -259,15 +270,6 @@ try:
 		# Delay the frame if slowmode is on
 		if slow_mode:
 			time.sleep(max([.5 - frame_time, 0.0]))
-
-		if exposure != -1:
-			# For a strange reason on some cameras (e.g. Lenoxo X1E)
-			# setting manual exposure works only after a couple frames
-			# are captured and even after a delay it does not
-			# always work. Setting exposure at every frame is
-			# reliable though.
-			video_capture.internal.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1.0)  # 1 = Manual
-			video_capture.internal.set(cv2.CAP_PROP_EXPOSURE, float(exposure))
 
 # On ctrl+C
 except KeyboardInterrupt:
