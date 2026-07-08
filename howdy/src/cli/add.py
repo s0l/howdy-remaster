@@ -174,7 +174,7 @@ elif len(face_locations) > 1:
 	print(_("Multiple faces detected, aborting"))
 	sys.exit(1)
 
-face_location = accepted_face_location or face_locations[0]
+face_location = accepted_face_location if accepted_face_location is not None else face_locations[0]
 
 # Get the encodings in the frame
 face_encoding = face_backend.encode(frame, face_location)
