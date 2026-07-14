@@ -35,7 +35,8 @@ mkdir -p \
 
 install -m 0644 howdy/src/config.ini "$root_dir/etc/howdy/config.ini"
 chmod 755 "$root_dir/var" "$root_dir/var/cache" "$root_dir/var/log" "$root_dir/etc/howdy"
-chmod 700 "$root_dir/etc/howdy/models" "$root_dir/var/cache/howdy" "$root_dir/var/log/howdy" "$root_dir/var/log/howdy/snapshots"
+chmod 700 "$root_dir/etc/howdy/models" "$root_dir/var/log/howdy" "$root_dir/var/log/howdy/snapshots"
+chmod 755 "$root_dir/var/cache/howdy"
 
 cat > "$root_dir/DEBIAN/control" <<EOF
 Package: howdy
@@ -69,10 +70,16 @@ find /lib/security/howdy /lib/security/howdy-gtk -xdev -exec chown -h root:root 
 chown root:root /etc/howdy /etc/howdy/models /etc/howdy/face-models /var/cache/howdy /var/log/howdy /var/log/howdy/snapshots
 chown root:root /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so
 
+if [ -f /var/cache/howdy/device_path ]; then
+	chown root:root /var/cache/howdy/device_path
+	chmod 644 /var/cache/howdy/device_path
+fi
+
 chmod 755 /lib/security/howdy /lib/security/howdy-gtk /etc/howdy /etc/howdy/face-models
 find /lib/security/howdy /lib/security/howdy-gtk -xdev -type d -exec chmod 755 {} +
 find /lib/security/howdy /lib/security/howdy-gtk -xdev -type f -exec chmod 644 {} +
-chmod 700 /etc/howdy/models /var/cache/howdy
+chmod 700 /etc/howdy/models
+chmod 755 /var/cache/howdy
 chmod 700 /var/log/howdy /var/log/howdy/snapshots
 chmod 644 /etc/howdy/config.ini
 chmod 755 /usr/bin/howdy /usr/bin/howdy-gtk /lib/security/pam_howdy.so

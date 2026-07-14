@@ -310,8 +310,11 @@ auto identify(pam_handle_t *pamh, int flags, int argc, const char **argv,
   const char *const args[] = {PYTHON_EXECUTABLE_PATH, // NOLINT
                               COMPARE_PROCESS_PATH, username, nullptr};
   std::vector<std::string> child_env_storage;
-  child_env_storage.reserve(12);
+  child_env_storage.reserve(16);
   child_env_storage.emplace_back("PATH=/usr/sbin:/usr/bin:/sbin:/bin");
+  if (service != nullptr) {
+    child_env_storage.emplace_back(std::string("HOWDY_PAM_SERVICE=") + service);
+  }
   if (confirmation_required) {
     child_env_storage.emplace_back("HOWDY_CONFIRM_AUTH=1");
   }

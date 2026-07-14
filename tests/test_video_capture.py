@@ -109,6 +109,40 @@ class VideoCaptureHelpersTest(unittest.TestCase):
         self.assertEqual(candidates[0]["path"], "/dev/v4l/by-path/ir")
         self.assertEqual(candidates[0]["real_path"], "/dev/video2")
 
+    def test_discover_camera_devices_probes_each_real_device_once(self):
+        def fake_glob(pattern):
+            if pattern == "/dev/v4l/by-path/*":
+                return ["/dev/v4l/by-path/rgb", "/dev/v4l/by-path/ir"]
+            if pattern == "/dev/video*":
+                return ["/dev/video0", "/dev/video2"]
+            return []
+
+        aliases = {
+            "/dev/v4l/by-path/rgb": "/dev/video0",
+            "/dev/v4l/by-path/ir": "/dev/video2",
+        }
+
+        def fake_realpath(path):
+            return aliases.get(path, path)
+
+        def fake_score(path, probe):
+            score = 130 if "ir" in path or path == "/dev/video2" else 20
+            return score, "IR camera" if score > 100 else "RGB camera"
+
+        with mock.patch.object(video_capture.glob, "glob", side_effect=fake_glob):
+            with mock.patch.object(video_capture.os.path, "exists", return_value=True):
+                with mock.patch.object(video_capture.os.path, "realpath", side_effect=fake_realpath):
+                    with mock.patch.object(video_capture, "_score_device", side_effect=fake_score) as score:
+                        video_capture.discover_camera_devices(probe=True)
+
+        probed_paths = [
+            call.args[0]
+            for call in score.call_args_list
+            if call.kwargs.get("probe", call.args[1] if len(call.args) > 1 else False)
+        ]
+        self.assertEqual(len(probed_paths), 2)
+        self.assertEqual(set(probed_paths), {"/dev/v4l/by-path/rgb", "/dev/v4l/by-path/ir"})
+
     def test_resolve_device_path_uses_existing_configured_path_without_scanning(self):
         config = config_with_device("/dev/video9")
 
@@ -193,8 +227,8 @@ class VideoCaptureHelpersTest(unittest.TestCase):
                 video_capture._write_cached_device_path("/dev/video2")
 
                 self.assertEqual(video_capture._read_cached_device_path(), "/dev/video2")
-                self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(cache_path)).st_mode), 0o700)
-                self.assertEqual(stat.S_IMODE(os.stat(cache_path).st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(cache_path)).st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(os.stat(cache_path).st_mode), 0o644)
 
     def test_video_capture_can_skip_constructor_warmup_read(self):
         config = config_with_device("/dev/video9")

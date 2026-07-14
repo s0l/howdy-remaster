@@ -5,6 +5,7 @@ import atexit
 import configparser
 import json
 import logging
+import logging.handlers
 import os
 import select
 import signal
@@ -19,6 +20,7 @@ import paths_factory
 import snapshot
 from camera_helper import CameraHelperClient, CameraHelperTimeout
 from face_backends import load_face_backend
+from frame_decision import FrameDecisionWindow
 from frame_quality import (
     classify_face_lighting,
     is_backlit_scene,
@@ -30,6 +32,11 @@ from i18n import _
 
 
 def setup_logger():
+    logger = logging.getLogger("howdy.compare")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     log_dir = "/var/log/howdy"
     try:
         os.makedirs(log_dir, mode=0o700, exist_ok=True)
@@ -38,15 +45,19 @@ def setup_logger():
         fd = os.open(log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         os.close(fd)
         os.chmod(log_file, 0o600)
-        logging.basicConfig(
-            filename=log_file,
-            level=logging.DEBUG,
-            format="%(asctime)s - %(levelname)s - %(message)s",
-        )
+        handler = logging.FileHandler(log_file)
     except PermissionError:
-        logging.basicConfig(level=logging.CRITICAL)
+        handler = logging.handlers.SysLogHandler(
+            address="/dev/log",
+            facility=logging.handlers.SysLogHandler.LOG_AUTH,
+        )
+        formatter = logging.Formatter("howdy.compare[%(process)d]: %(levelname)s - %(message)s")
 
-    return logging.getLogger("howdy.compare")
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
 
 
 logger = setup_logger()
@@ -253,6 +264,7 @@ gtk_stdout = config.getboolean("debug", "gtk_stdout", fallback=False)
 rotate = config.getint("video", "rotate", fallback=0)
 timeout = config.getint("video", "timeout", fallback=DEFAULT_TIMEOUT)
 confirmation_required = os.environ.get("HOWDY_CONFIRM_AUTH") == "1"
+pam_service = os.environ.get("HOWDY_PAM_SERVICE", "")
 
 gtk_pipe = sys.stdout if gtk_stdout else subprocess.DEVNULL
 gtk_stdout_pipe = subprocess.PIPE if confirmation_required else gtk_pipe
@@ -310,6 +322,19 @@ def request_ui_confirmation() -> bool:
 
 timings["in"] = time.time() - timings["st"]
 logger.info("Face backend %s initialized", face_backend.name)
+logger.info(
+    "Compare context user=%s service=%s uid=%d euid=%d pid=%d ppid=%d confirmation_required=%s timeout=%ds rotate=%d max_height=%s",
+    user,
+    pam_service or "-",
+    os.getuid(),
+    os.geteuid(),
+    os.getpid(),
+    os.getppid(),
+    confirmation_required,
+    timeout,
+    rotate,
+    config.get("video", "max_height", fallback="320"),
+)
 
 timings["ic"] = time.time()
 logger.info("Opening video capture device")
@@ -324,6 +349,7 @@ except RuntimeError as err:
 logger.info("Video capture opened successfully")
 timings["ic"] = time.time() - timings["ic"]
 logger.info("Camera opened in %.2fs", timings["ic"])
+logger.info("Camera metadata: %s", video_capture.metadata)
 
 max_height = config.getfloat("video", "max_height", fallback=320.0)
 height = video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
@@ -333,6 +359,9 @@ scaling_factor = (max_height / height) or 1
 
 unlit_threshold = config.getfloat("video", "unlit_threshold", fallback=24.0)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60.0)
+decision_window = FrameDecisionWindow(
+    config.getint("video", "frame_decision_window", fallback=3)
+)
 end_report = config.getboolean("debug", "end_report", fallback=False)
 
 clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -353,11 +382,12 @@ while True:
             make_snapshot(_("FAILED"))
 
         logger.error(
-            "Timeout reached after %.2fs, scanned %d frames (%d valid, %d dark)",
+            "Timeout reached after %.2fs, scanned %d frames (%d valid, %d dark), decision_window=%s",
             elapsed,
             frames,
             valid_frames,
             dark_tries,
+            decision_window.summary(),
         )
 
         if valid_frames == 0 and dark_tries > 0:
@@ -391,6 +421,14 @@ while True:
 
     if is_black_frame(raw_gsframe):
         black_tries += 1
+        decision_window.add(
+            black=True,
+            unlit=True,
+            dark_percent=metrics["dark_percent"],
+            p95=metrics["p95"],
+            face_count=0,
+        )
+        logger.debug("Frame %d: decision_window=%s", frames, decision_window.summary())
         send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
         continue
 
@@ -444,24 +482,24 @@ while True:
     face_locations = face_backend.detect(frame, gsframe)
     logger.debug("Frame %d: detected %d face(s)", frames, len(face_locations))
 
+    frame_backlit = False
+    frame_face_dark = False
+
     if not face_locations:
-        backlit_scene = is_backlit_scene(raw_scan_frame)
-        if backlit_scene:
-            send_to_ui("M", _("Backlit scene, adjusting exposure"))
-            try:
-                bracket = video_capture.advance_exposure_bracket()
-                logger.debug("Frame %d: exposure bracket result=%s", frames, bracket)
-            except (CameraHelperTimeout, RuntimeError) as err:
-                logger.debug("Frame %d: exposure bracket unavailable: %s", frames, err)
+        frame_backlit = is_backlit_scene(raw_scan_frame)
         if is_unlit_frame(raw_gsframe, unlit_threshold):
             dark_tries += 1
             dark_running_total += metrics["dark_percent"]
             send_to_ui("S", format_scan_status(frames, black_tries, dark_tries))
-        elif not backlit_scene:
+        elif frame_backlit:
+            send_to_ui("M", _("Backlit scene"))
+        else:
             send_to_ui("M", _("Look at the camera"))
 
     for face_location in face_locations:
         lighting = classify_face_lighting(raw_scan_frame, face_location, dark_threshold=dark_threshold)
+        frame_backlit = frame_backlit or lighting["backlit"]
+        frame_face_dark = frame_face_dark or lighting["face_dark"]
         logger.debug(
             "Frame %d: face_lighting=%s face_dark=%.1f%% face_p95=%.1f global_p95=%.1f",
             frames,
@@ -478,11 +516,6 @@ while True:
                 "M",
                 _("Face is underexposed") if not lighting["backlit"] else _("Face is backlit"),
             )
-            try:
-                tuning = video_capture.tune_for_dark_face(backlit=lighting["backlit"])
-                logger.debug("Frame %d: camera tuning result=%s", frames, tuning)
-            except (CameraHelperTimeout, RuntimeError) as err:
-                logger.debug("Frame %d: camera tuning unavailable: %s", frames, err)
 
         face_encoding = face_backend.encode(frame, face_location)
         match_index, match = face_backend.match(encodings, face_encoding)
@@ -528,3 +561,32 @@ while True:
                 exit(15)
 
             exit(0)
+
+    decision_window.add(
+        black=False,
+        unlit=is_unlit_frame(raw_gsframe, unlit_threshold),
+        dark_percent=metrics["dark_percent"],
+        p95=metrics["p95"],
+        face_count=len(face_locations),
+        backlit=frame_backlit,
+        face_dark=frame_face_dark,
+    )
+    logger.debug("Frame %d: decision_window=%s", frames, decision_window.summary())
+
+    if decision_window.alternating_bad_frames():
+        logger.debug("Frame %d: skipping camera tuning for alternating dark/no-face frames", frames)
+        continue
+
+    if not face_locations and decision_window.stable_no_face_backlit():
+        send_to_ui("M", _("Backlit scene, adjusting exposure"))
+        try:
+            bracket = video_capture.advance_exposure_bracket()
+            logger.debug("Frame %d: exposure bracket result=%s", frames, bracket)
+        except (CameraHelperTimeout, RuntimeError) as err:
+            logger.debug("Frame %d: exposure bracket unavailable: %s", frames, err)
+    elif face_locations and decision_window.stable_face_dark():
+        try:
+            tuning = video_capture.tune_for_dark_face(backlit=frame_backlit)
+            logger.debug("Frame %d: camera tuning result=%s", frames, tuning)
+        except (CameraHelperTimeout, RuntimeError) as err:
+            logger.debug("Frame %d: camera tuning unavailable: %s", frames, err)

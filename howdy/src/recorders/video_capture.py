@@ -16,6 +16,8 @@ from i18n import _
 
 AUTO_DEVICE_PATHS = {"", "none", "auto"}
 DEVICE_CACHE_PATH = "/var/cache/howdy/device_path"
+CACHE_DIR_MODE = 0o755
+CACHE_FILE_MODE = 0o644
 EXPOSURE_CONTROL_NAMES = ("exposure_time_absolute", "exposure_absolute")
 
 
@@ -98,14 +100,14 @@ def _read_cached_device_path():
 def _write_cached_device_path(path):
     cache_dir = os.path.dirname(DEVICE_CACHE_PATH)
     try:
-        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
-        os.chmod(cache_dir, 0o700)
+        os.makedirs(cache_dir, mode=CACHE_DIR_MODE, exist_ok=True)
+        os.chmod(cache_dir, CACHE_DIR_MODE)
         fd, tmp_path = tempfile.mkstemp(prefix=".device_path.", dir=cache_dir, text=True)
-        os.chmod(tmp_path, 0o600)
+        os.chmod(tmp_path, CACHE_FILE_MODE)
         with os.fdopen(fd, "w") as cache_file:
             cache_file.write(path + "\n")
         os.replace(tmp_path, DEVICE_CACHE_PATH)
-        os.chmod(DEVICE_CACHE_PATH, 0o600)
+        os.chmod(DEVICE_CACHE_PATH, CACHE_FILE_MODE)
     except OSError:
         try:
             if "tmp_path" in locals():
@@ -241,6 +243,8 @@ def discover_camera_devices(probe=True):
 	for sysfs_path in glob.glob("/sys/class/video4linux/video*"):
 		paths.append("/dev/" + os.path.basename(sysfs_path))
 
+	# Pick the best alias for each endpoint before opening hardware. A single
+	# /dev/video node is commonly listed through several by-path/by-id aliases.
 	candidates = {}
 	for path in sorted(paths):
 		sysfs_name_path = os.path.join(
@@ -250,7 +254,7 @@ def discover_camera_devices(probe=True):
 			continue
 
 		real_path = os.path.realpath(path)
-		score, name = _score_device(path, probe=probe)
+		score, name = _score_device(path, probe=False)
 		current = candidates.get(real_path)
 
 		if current is None or score > current["score"]:
@@ -260,6 +264,12 @@ def discover_camera_devices(probe=True):
 				"name": name,
 				"score": score,
 			}
+
+	if probe:
+		for candidate in candidates.values():
+			score, name = _score_device(candidate["path"], probe=True)
+			candidate["score"] = score
+			candidate["name"] = name
 
 	return sorted(candidates.values(), key=lambda candidate: (-candidate["score"], candidate["path"]))
 

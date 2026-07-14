@@ -26,8 +26,13 @@ class DebianPackagingSecurityTest(unittest.TestCase):
         self.assertNotRegex(self.script, re.compile(r"chown\s+-R[^\n]*(/etc/howdy|/var/cache/howdy|/var/log/howdy)"))
 
     def test_postinst_keeps_sensitive_runtime_directories_private(self):
-        self.assertIn("chmod 700 /etc/howdy/models /var/cache/howdy", self.script)
+        self.assertIn("chmod 700 /etc/howdy/models", self.script)
         self.assertIn("chmod 700 /var/log/howdy /var/log/howdy/snapshots", self.script)
+
+    def test_postinst_makes_root_owned_camera_cache_readable_by_lockscreen(self):
+        self.assertIn("chmod 755 /var/cache/howdy", self.script)
+        self.assertIn("chown root:root /var/cache/howdy/device_path", self.script)
+        self.assertIn("chmod 644 /var/cache/howdy/device_path", self.script)
 
     def test_package_tree_keeps_sensitive_runtime_directories_private(self):
         self.assertIn('"$root_dir/etc/howdy/models"', self.script)

@@ -11,7 +11,8 @@ import cv2
 import paths_factory
 
 from face_backends import load_face_backend
-from frame_quality import classify_face_lighting, is_backlit_scene, is_unlit_frame
+from frame_decision import FrameDecisionWindow
+from frame_quality import classify_face_lighting, is_backlit_scene, is_unlit_frame, light_metrics
 from i18n import _
 from recorders.video_capture import VideoCapture
 
@@ -29,6 +30,15 @@ video_capture = VideoCapture(config)
 video_certainty = config.getfloat("video", "certainty", fallback=3.5) / 10
 unlit_threshold = config.getfloat("video", "unlit_threshold", fallback=24.0)
 dark_threshold = config.getfloat("video", "dark_threshold", fallback=60.0)
+max_height = config.getfloat("video", "max_height", fallback=320.0)
+rotate = config.getint("video", "rotate", fallback=0)
+capture_height = video_capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1
+if rotate == 2:
+	capture_height = video_capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 1
+scaling_factor = (max_height / capture_height) or 1
+decision_window = FrameDecisionWindow(
+	config.getint("video", "frame_decision_window", fallback=3)
+)
 
 # Let the user know what's up
 print(_("""
@@ -138,8 +148,52 @@ try:
 		orig_frame, frame = video_capture.read_frame()
 
 		raw_frame = frame
+		metrics = light_metrics(raw_frame)
 		is_unlit = is_unlit_frame(frame, unlit_threshold)
 		frame = clahe.apply(frame)
+
+		if scaling_factor != 1:
+			orig_frame = cv2.resize(
+				orig_frame,
+				None,
+				fx=scaling_factor,
+				fy=scaling_factor,
+				interpolation=cv2.INTER_AREA,
+			)
+			frame = cv2.resize(
+				frame,
+				None,
+				fx=scaling_factor,
+				fy=scaling_factor,
+				interpolation=cv2.INTER_AREA,
+			)
+			raw_frame = cv2.resize(
+				raw_frame,
+				None,
+				fx=scaling_factor,
+				fy=scaling_factor,
+				interpolation=cv2.INTER_AREA,
+			)
+
+		if rotate == 1:
+			if total_frames % 3 == 1:
+				orig_frame = cv2.rotate(orig_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+				frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+				raw_frame = cv2.rotate(raw_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+			if total_frames % 3 == 2:
+				orig_frame = cv2.rotate(orig_frame, cv2.ROTATE_90_CLOCKWISE)
+				frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+				raw_frame = cv2.rotate(raw_frame, cv2.ROTATE_90_CLOCKWISE)
+		elif rotate == 2:
+			if total_frames % 2 == 0:
+				orig_frame = cv2.rotate(orig_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+				frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+				raw_frame = cv2.rotate(raw_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+			else:
+				orig_frame = cv2.rotate(orig_frame, cv2.ROTATE_90_CLOCKWISE)
+				frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+				raw_frame = cv2.rotate(raw_frame, cv2.ROTATE_90_CLOCKWISE)
+
 		# Make a frame to put overlays in
 		overlay = frame.copy()
 		overlay = cv2.cvtColor(overlay, cv2.COLOR_GRAY2BGR)
@@ -174,6 +228,13 @@ try:
 
 		# Ignore only frames that are globally unlit before contrast enhancement.
 		if is_unlit:
+			decision_window.add(
+				black=False,
+				unlit=True,
+				dark_percent=metrics["dark_percent"],
+				p95=metrics["p95"],
+				face_count=0,
+			)
 			# Show that this is an ignored frame in the top right
 			cv2.putText(overlay, _("DARK FRAME"), (width - 68, 16), cv2.FONT_HERSHEY_SIMPLEX, .3, (0, 0, 255), 0, cv2.LINE_AA)
 		else:
@@ -186,20 +247,38 @@ try:
 			face_locations = face_backend.detect(frame, frame)
 			rec_tm = time.time() - rec_tm
 			frame_status = None
+			frame_backlit = False
+			frame_face_dark = False
 
 			if not face_locations:
-				if is_backlit_scene(raw_frame):
+				backlit_scene = is_backlit_scene(raw_frame)
+				frame_backlit = backlit_scene
+				decision_window.add(
+					black=False,
+					unlit=is_unlit,
+					dark_percent=metrics["dark_percent"],
+					p95=metrics["p95"],
+					face_count=0,
+					backlit=backlit_scene,
+				)
+				if decision_window.alternating_bad_frames():
+					frame_status = _("IR FRAME PHASE")
+				elif backlit_scene and decision_window.stable_no_face_backlit():
 					bracket = video_capture.advance_exposure_bracket()
 					frame_status = _("BACKLIT NO FACE: exposure {target} ({strategy})").format(
 						target=bracket.get("target", bracket.get("reason", "?")),
 						strategy=bracket.get("strategy", "?"),
 					)
+				elif backlit_scene:
+					frame_status = _("BACKLIT NO FACE")
 				else:
 					frame_status = _("NO FACE")
 
 			# Loop though all faces and paint a circle around them
 			for loc in face_locations:
 				lighting = classify_face_lighting(raw_frame, loc, dark_threshold=dark_threshold)
+				frame_backlit = frame_backlit or lighting["backlit"]
+				frame_face_dark = frame_face_dark or lighting["face_dark"]
 				# By default the circle around the face is red for no match
 				color = (0, 0, 230)
 
@@ -249,6 +328,17 @@ try:
 
 				# Draw the Circle in green
 				cv2.circle(overlay, (x, y), r, color, 2)
+
+			if face_locations:
+				decision_window.add(
+					black=False,
+					unlit=is_unlit,
+					dark_percent=metrics["dark_percent"],
+					p95=metrics["p95"],
+					face_count=len(face_locations),
+					backlit=frame_backlit,
+					face_dark=frame_face_dark,
+				)
 
 			if frame_status:
 				emit_status(frame_status)

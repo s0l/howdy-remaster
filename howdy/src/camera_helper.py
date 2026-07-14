@@ -290,8 +290,10 @@ def helper_main():
 
         video_capture = VideoCapture(config, warmup=False)
         metadata = {
+            "device_path": video_capture.device_path,
             "frame_width": video_capture.internal.get(cv2.CAP_PROP_FRAME_WIDTH) or 1,
             "frame_height": video_capture.internal.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1,
+            "configured_fps": config.get("video", "device_fps", fallback="-1"),
         }
         write_message(protocol_stdout, READY, metadata)
     except SystemExit as err:
